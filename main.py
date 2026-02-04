@@ -1,9 +1,14 @@
 import asyncio
 import logging
 import sys
-import warnings
+import warnings  # 1. Импортируем warnings
+
+# 2. 🔥 СРАЗУ ГЛУШИМ ПРЕДУПРЕЖДЕНИЯ (ДО импорта aiogram) 🔥
+warnings.filterwarnings("ignore", message="Field.*has conflict with protected namespace")
+
 from typing import Callable, Dict, Any, Awaitable
 
+# 3. Теперь можно импортировать aiogram (он уже будет молчать)
 from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -27,17 +32,14 @@ from handlers.ai_chat import router as ai_chat_router
 from handlers.common import router as common_router
 from handlers.analysis import router as analysis_router
 
-# 1. Заглушаем предупреждения Pydantic
-warnings.filterwarnings("ignore", message="Field.*has conflict with protected namespace")
-
-# 2. Настраиваем логирование: показываем только ВАЖНОЕ (INFO), формат упрощен
+# Настраиваем логирование: показываем только ВАЖНОЕ (INFO), формат упрощен
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
     datefmt='%H:%M:%S'
 )
 
-# 3. 🔥 ЗАГЛУШАЕМ ШУМ БИБЛИОТЕК 🔥
+# ЗАГЛУШАЕМ ШУМ БИБЛИОТЕК
 # Отключаем спам от HTTP запросов, событий бота и планировщика
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("aiogram.event").setLevel(logging.WARNING)
