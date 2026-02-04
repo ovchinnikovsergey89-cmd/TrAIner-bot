@@ -22,5 +22,8 @@ class User(Base):
     workout_level: Mapped[str] = mapped_column(String, nullable=True)
     workout_days: Mapped[int] = mapped_column(Integer, nullable=True)
     
-    # 🔥 НОВОЕ ПОЛЕ: Здесь мы будем хранить программу тренировок (в формате JSON)
+    # Программа тренировок (JSON)
     current_workout_program: Mapped[str] = mapped_column(Text, nullable=True)
+
+    # 🔥 НОВОЕ ПОЛЕ: Программа питания (JSON)
+    current_nutrition_program: Mapped[str] = mapped_column(Text, nullable=True)

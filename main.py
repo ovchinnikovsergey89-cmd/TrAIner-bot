@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 from typing import Callable, Dict, Any, Awaitable
 
 from aiogram import Bot, Dispatcher, BaseMiddleware
