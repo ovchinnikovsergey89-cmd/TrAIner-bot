@@ -3,10 +3,10 @@ import re
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, ReplyKeyboardRemove
+from keyboards.main_menu import get_main_menu
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from keyboards.main_menu import get_main_menu
 from states.user_states import UserForm
 from database.crud import UserCRUD
@@ -28,8 +28,8 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     Если пользователь новый -> Регистрация.
     Если старый -> Главное меню.
     """
-    await state.clear()
     await message.answer("...", reply_markup=get_main_menu())
+    await state.clear()
     
     # Проверяем, есть ли такой пользователь
     user = await UserCRUD.get_user(session, message.from_user.id)
