@@ -9,7 +9,7 @@ def get_main_menu() -> ReplyKeyboardMarkup:
     
     # 1-й ряд: Самые главные функции
     builder.row(
-        KeyboardButton(text="🤖 Тренировка"),
+        KeyboardButton(text="🤖 AI Тренировка"),
         KeyboardButton(text="📅 Моя программа")
     )
     
