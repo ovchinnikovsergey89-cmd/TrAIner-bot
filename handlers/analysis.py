@@ -15,14 +15,10 @@ router = Router()
 class AnalysisState(StatesGroup):
     waiting_for_weight = State()
 
-# --- ВХОД В АНАЛИЗ (Универсальный) ---
+# --- ВХОД В АНАЛИЗ ---
 @router.message(F.text == "📊 Анализ")
 @router.callback_query(F.data == "ai_analysis")
 async def start_analysis(event: Union[Message, CallbackQuery], state: FSMContext):
-    """
-    Обрабатывает и нажатие кнопки меню (Message), 
-    и нажатие инлайн-кнопки (CallbackQuery).
-    """
     if isinstance(event, Message):
         message = event
     else:
@@ -42,63 +38,67 @@ async def start_analysis(event: Union[Message, CallbackQuery], state: FSMContext
 # --- ОБРАБОТКА ВЕСА ---
 @router.message(AnalysisState.waiting_for_weight)
 async def process_analysis(message: Message, state: FSMContext, session: AsyncSession):
-    # Пытаемся понять число
     text = message.text.replace(',', '.')
-    
-    if text.startswith('/'):
-        return
+    if text.startswith('/'): return
 
     try:
         new_weight = float(text)
-        if not (30 <= new_weight <= 250):
-            raise ValueError
+        if not (30 <= new_weight <= 250): raise ValueError
     except ValueError:
         await message.answer("Пожалуйста, введите корректный вес числом (например: 80.5)")
         return
 
-    # Получаем данные пользователя
     user = await UserCRUD.get_user(session, message.from_user.id)
     if not user:
         await message.answer("Ошибка: Профиль не найден. Нажмите /start")
         await state.clear()
         return
 
-    # --- 🔥 ИСПРАВЛЕНИЕ ЗДЕСЬ 🔥 ---
-    # Сохраняем старый вес в переменную ДО обновления базы
-    old_weight = user.weight
-    # -------------------------------
+    old_weight = user.weight or new_weight # Если старого нет, считаем что он равен новому
+    
+    # 🔥 МАТЕМАТИКА (Считаем сами, не доверяем ИИ цифры)
+    delta = new_weight - old_weight
+    
+    if delta < 0:
+        trend = f"📉 Ты сбросил(а) {abs(delta):.1f} кг!"
+    elif delta > 0:
+        trend = f"📈 Ты набрал(а) {abs(delta):.1f} кг."
+    else:
+        trend = "⚖️ Вес не изменился."
 
-    msg = await message.answer("🤔 <b>Сравниваю с прошлыми данными...</b>", parse_mode=ParseMode.HTML)
+    msg = await message.answer(f"{trend}\n🧠 <b>Анализирую данные...</b>", parse_mode=ParseMode.HTML)
 
-    # Запускаем AI
+    # Запускаем AI с полным контекстом
     ai = GroqService()
     user_data = {
-        "weight": old_weight, # Отправляем старый вес
+        "weight": old_weight, # Старый вес
+        "new_weight": new_weight, # Новый вес
         "goal": user.goal,
-        "gender": user.gender
+        "gender": user.gender,
+        "height": user.height, # Добавили рост для ИМТ
+        "age": user.age # Добавили возраст
     }
     
     try:
+        # В сервисе нужно будет использовать эти поля
         feedback = await ai.analyze_progress(user_data, new_weight)
         
-        # Чистка текста от мусора
+        # Чистка
         if feedback:
-            feedback = feedback.replace("<p>", "").replace("</p>", "\n\n")
-            feedback = feedback.replace("###", "")
+            feedback = feedback.replace("<p>", "").replace("</p>", "\n\n").replace("###", "")
         else:
-            feedback = "Не удалось получить анализ."
+            feedback = "Тренер задумался..."
 
-        # Обновляем вес в базе данных (только сейчас!)
+        # Обновляем БД
         await UserCRUD.update_user(session, message.from_user.id, weight=new_weight)
         
         await msg.delete()
         
-        # Формируем ответ, используя сохраненную переменную old_weight
         result_text = (
-            f"📊 <b>Результат анализа:</b>\n"
-            f"Было: {old_weight} кг ➡️ Стало: {new_weight} кг\n\n"
-            f"💬 <b>Мнение тренера:</b>\n{feedback}\n\n"
-            f"<i>(Я обновил твой вес в профиле)</i>"
+            f"📊 <b>Результат:</b>\n"
+            f"{old_weight} кг ➡️ <b>{new_weight} кг</b>\n"
+            f"{trend}\n\n"
+            f"💬 <b>Совет тренера:</b>\n{feedback}"
         )
         
         await message.answer(result_text, reply_markup=get_main_menu(), parse_mode=ParseMode.HTML)

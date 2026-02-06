@@ -1,6 +1,7 @@
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,256 +18,190 @@ from keyboards import (
 
 router = Router()
 
-# ========== КОМАНДЫ РЕДАКТИРОВАНИЯ ==========
+# --- КЛАВИАТУРА МЕНЮ РЕДАКТИРОВАНИЯ ---
+def get_edit_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🎂 Возраст", callback_data="edit_age"),
+        InlineKeyboardButton(text="📏 Рост", callback_data="edit_height")
+    )
+    builder.row(
+        InlineKeyboardButton(text="⚖️ Вес", callback_data="edit_weight"),
+        InlineKeyboardButton(text="👫 Пол", callback_data="edit_gender")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🎯 Цель", callback_data="edit_goal"),
+        InlineKeyboardButton(text="🏃 Активность", callback_data="edit_activity")
+    )
+    builder.row(
+        InlineKeyboardButton(text="💪 Уровень", callback_data="edit_level"),
+        InlineKeyboardButton(text="📅 Дни трен.", callback_data="edit_days")
+    )
+    builder.row(InlineKeyboardButton(text="🔙 Закончить редактирование", callback_data="cancel_edit"))
+    return builder.as_markup()
+
+# ========== ЗАПУСК РЕДАКТИРОВАНИЯ ==========
 
 @router.message(Command("edit"))
+@router.message(F.text == "⚙️ Профиль") # Если вдруг добавишь такую кнопку
 async def cmd_edit(message: Message):
-    """Начало редактирования профиля"""
+    """Показывает меню редактирования"""
     await message.answer(
-        "📝 *Редактирование профиля*\n\n"
-        "Что вы хотите изменить?\n\n"
-        "1. Возраст - отправьте 'возраст'\n"
-        "2. Пол - отправьте 'пол'\n"
-        "3. Вес - отправьте 'вес'\n"
-        "4. Рост - отправьте 'рост'\n"
-        "5. Активность - отправьте 'активность'\n"
-        "6. Цель - отправьте 'цель'\n"
-        "7. Уровень тренировок - отправьте 'уровень'\n"
-        "8. Дни тренировок - отправьте 'дни'\n\n"
-        "Или /cancel для отмены",
-        parse_mode="Markdown"
+        "📝 <b>Редактирование профиля</b>\n\n"
+        "Выберите, что хотите изменить:",
+        reply_markup=get_edit_keyboard(),
+        parse_mode="HTML"
     )
 
-@router.message(F.text.lower() == "возраст")
-async def edit_age(message: Message, state: FSMContext):
-    await message.answer("Введите новый возраст:")
+# ========== ОБРАБОТКА КНОПОК МЕНЮ ==========
+
+@router.callback_query(F.data == "edit_age")
+async def cb_edit_age(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("🎂 Введите новый <b>возраст</b> (числом):", parse_mode="HTML")
     await state.set_state(UserForm.age)
 
-@router.message(F.text.lower() == "вес")
-async def edit_weight(message: Message, state: FSMContext):
-    await message.answer("Введите новый вес (кг):")
+@router.callback_query(F.data == "edit_weight")
+async def cb_edit_weight(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("⚖️ Введите новый <b>вес</b> (в кг):", parse_mode="HTML")
     await state.set_state(UserForm.weight)
 
-@router.message(F.text.lower() == "рост")
-async def edit_height(message: Message, state: FSMContext):
-    await message.answer("Введите новый рост (см):")
+@router.callback_query(F.data == "edit_height")
+async def cb_edit_height(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("📏 Введите новый <b>рост</b> (в см):", parse_mode="HTML")
     await state.set_state(UserForm.height)
 
-@router.message(F.text.lower() == "пол")
-async def edit_gender(message: Message, state: FSMContext):
-    await message.answer("Выберите новый пол:", reply_markup=get_gender_keyboard())
+@router.callback_query(F.data == "edit_gender")
+async def cb_edit_gender(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("👫 Выберите пол:", reply_markup=get_gender_keyboard())
+    await callback.message.delete() # Удаляем старое меню для красоты
     await state.set_state(UserForm.gender)
 
-@router.message(F.text.lower() == "активность")
-async def edit_activity(message: Message, state: FSMContext):
-    await message.answer("Выберите новый уровень активности:", reply_markup=get_activity_keyboard())
+@router.callback_query(F.data == "edit_activity")
+async def cb_edit_activity(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("🏃 Выберите активность:", reply_markup=get_activity_keyboard())
+    await callback.message.delete()
     await state.set_state(UserForm.activity_level)
 
-@router.message(F.text.lower() == "цель")
-async def edit_goal(message: Message, state: FSMContext):
-    await message.answer("Выберите новую цель:", reply_markup=get_goal_keyboard())
+@router.callback_query(F.data == "edit_goal")
+async def cb_edit_goal(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("🎯 Выберите цель:", reply_markup=get_goal_keyboard())
+    await callback.message.delete()
     await state.set_state(UserForm.goal)
 
-@router.message(F.text.lower() == "уровень")
-async def edit_workout_level(message: Message, state: FSMContext):
-    await message.answer("Выберите новый уровень тренировок:", reply_markup=get_workout_level_keyboard())
+@router.callback_query(F.data == "edit_level")
+async def cb_edit_level(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("💪 Выберите уровень:", reply_markup=get_workout_level_keyboard())
+    await callback.message.delete()
     await state.set_state(UserForm.workout_level)
 
-@router.message(F.text.lower() == "дни")
-async def edit_workout_days(message: Message, state: FSMContext):
-    await message.answer("Сколько дней в неделю готовы тренироваться?", 
-                         reply_markup=get_workout_days_keyboard())
+@router.callback_query(F.data == "edit_days")
+async def cb_edit_days(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("📅 Сколько дней тренироваться?", reply_markup=get_workout_days_keyboard())
+    await callback.message.delete()
     await state.set_state(UserForm.workout_days)
 
-@router.message(Command("cancel"))
-async def cancel_edit(message: Message, state: FSMContext):
+@router.callback_query(F.data == "cancel_edit")
+async def cb_cancel_edit(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await message.answer("Редактирование отменено.")
+    await callback.message.delete()
+    await callback.message.answer("✅ Редактирование завершено.", reply_markup=get_main_menu())
 
-# ========== ОБРАБОТЧИКИ СОСТОЯНИЙ ==========
+# ========== ОБРАБОТЧИКИ ВВОДА (ЛОГИКА) ==========
+# (Осталась почти такой же, но с возвратом в меню редактирования или главное меню)
 
 @router.message(UserForm.age)
 async def process_age(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка возраста"""
     try:
         age = int(message.text)
         if 10 <= age <= 100:
-            success = await UserCRUD.update_user(
-                session=session,
-                telegram_id=message.from_user.id,
-                age=age
-            )
-            if success:
-                await message.answer(f"✅ Возраст обновлен: {age} лет", reply_markup=get_main_menu())
-                await state.clear()
-            else:
-                await message.answer("❌ Ошибка обновления")
+            await UserCRUD.update_user(session, message.from_user.id, age=age)
+            await message.answer(f"✅ Возраст: {age}", reply_markup=get_main_menu())
+            await state.clear()
         else:
-            await message.answer("❌ Возраст должен быть от 10 до 100 лет")
+            await message.answer("❌ От 10 до 100 лет.")
     except ValueError:
-        await message.answer("❌ Введите число (например: 25)")
+        await message.answer("❌ Введите число.")
 
 @router.message(UserForm.weight)
 async def process_weight(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка веса"""
     try:
-        weight = float(message.text)
-        if 30 <= weight <= 250:
-            success = await UserCRUD.update_user(
-                session=session,
-                telegram_id=message.from_user.id,
-                weight=weight
-            )
-            if success:
-                await message.answer(f"✅ Вес обновлен: {weight} кг", reply_markup=get_main_menu())
-                await state.clear()
-            else:
-                await message.answer("❌ Ошибка обновления")
+        val = float(message.text.replace(',', '.'))
+        if 30 <= val <= 250:
+            await UserCRUD.update_user(session, message.from_user.id, weight=val)
+            await message.answer(f"✅ Вес: {val} кг", reply_markup=get_main_menu())
+            await state.clear()
         else:
-            await message.answer("❌ Вес должен быть от 30 до 250 кг")
+            await message.answer("❌ От 30 до 250 кг.")
     except ValueError:
-        await message.answer("❌ Введите число (например: 75.5)")
+        await message.answer("❌ Введите число.")
 
 @router.message(UserForm.height)
 async def process_height(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка роста"""
     try:
-        height = float(message.text)
-        if 100 <= height <= 250:
-            success = await UserCRUD.update_user(
-                session=session,
-                telegram_id=message.from_user.id,
-                height=height
-            )
-            if success:
-                await message.answer(f"✅ Рост обновлен: {height} см", reply_markup=get_main_menu())
-                await state.clear()
-            else:
-                await message.answer("❌ Ошибка обновления")
+        val = float(message.text.replace(',', '.'))
+        if 100 <= val <= 250:
+            await UserCRUD.update_user(session, message.from_user.id, height=val)
+            await message.answer(f"✅ Рост: {val} см", reply_markup=get_main_menu())
+            await state.clear()
         else:
-            await message.answer("❌ Рост должен быть от 100 до 250 см")
+            await message.answer("❌ От 100 до 250 см.")
     except ValueError:
-        await message.answer("❌ Введите число (например: 180)")
+        await message.answer("❌ Введите число.")
+
+# --- Обработчики кнопок (Пол, Цель и т.д.) ---
+# Они остаются похожими, но я сократил код для удобства
 
 @router.message(UserForm.gender)
 async def process_gender(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка выбора пола"""
-    if message.text == "👨 Мужской":
-        gender = "male"
-    elif message.text == "👩 Женский":
-        gender = "female"
-    else:
-        await message.answer("Выберите пол из кнопок:", reply_markup=get_gender_keyboard())
-        return
-    
-    success = await UserCRUD.update_user(
-        session=session,
-        telegram_id=message.from_user.id,
-        gender=gender
-    )
-    
-    if success:
-        await message.answer(f"✅ Пол обновлен!", reply_markup=get_main_menu())
+    g_map = {"👨 Мужской": "male", "👩 Женский": "female"}
+    if message.text in g_map:
+        await UserCRUD.update_user(session, message.from_user.id, gender=g_map[message.text])
+        await message.answer("✅ Пол обновлен", reply_markup=get_main_menu())
         await state.clear()
     else:
-        await message.answer("❌ Ошибка обновления")
+        await message.answer("Выберите кнопку.")
 
 @router.message(UserForm.activity_level)
 async def process_activity(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка уровня активности"""
-    activity_map = {
-        "🛌 Сидячий образ жизни": "sedentary",
-        "🚶 Легкая активность (1-3 тренировки/неделю)": "light",
-        "🏃 Средняя активность (3-5 тренировок/неделю)": "medium",
-        "🏋️ Высокая активность (6-7 тренировок/неделю)": "high"
-    }
-    
-    if message.text in activity_map:
-        activity = activity_map[message.text]
-        success = await UserCRUD.update_user(
-            session=session,
-            telegram_id=message.from_user.id,
-            activity_level=activity
-        )
-        if success:
-            await message.answer(f"✅ Активность обновлена", reply_markup=get_main_menu())
-            await state.clear()
-        else:
-            await message.answer("❌ Ошибка обновления")
+    # Упрощенная проверка на вхождение части текста
+    act_map = {"Сидячий": "sedentary", "Легкая": "light", "Средняя": "medium", "Высокая": "high"}
+    found = next((v for k, v in act_map.items() if k in message.text), None)
+    if found:
+        await UserCRUD.update_user(session, message.from_user.id, activity_level=found)
+        await message.answer("✅ Активность обновлена", reply_markup=get_main_menu())
+        await state.clear()
     else:
-        await message.answer("❌ Выберите вариант из кнопок", reply_markup=get_activity_keyboard())
+        await message.answer("Выберите кнопку.")
 
 @router.message(UserForm.goal)
 async def process_goal(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка цели"""
-    goal_map = {
-        "⚖️ Похудение": "weight_loss",
-        "💪 Набор массы": "muscle_gain",
-        "🏃 Поддержание формы": "maintenance"
-    }
-    
-    if message.text in goal_map:
-        goal = goal_map[message.text]
-        success = await UserCRUD.update_user(
-            session=session,
-            telegram_id=message.from_user.id,
-            goal=goal
-        )
-        if success:
-            await message.answer(f"✅ Цель обновлена", reply_markup=get_main_menu())
-            await state.clear()
-        else:
-            await message.answer("❌ Ошибка обновления")
+    goal_map = {"Похудение": "weight_loss", "Набор": "muscle_gain", "Поддержание": "maintenance"}
+    found = next((v for k, v in goal_map.items() if k in message.text), None)
+    if found:
+        await UserCRUD.update_user(session, message.from_user.id, goal=found)
+        await message.answer("✅ Цель обновлена", reply_markup=get_main_menu())
+        await state.clear()
     else:
-        await message.answer("❌ Выберите вариант из кнопок", reply_markup=get_goal_keyboard())
+        await message.answer("Выберите кнопку.")
 
 @router.message(UserForm.workout_level)
-async def process_workout_level(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка уровня тренировок"""
-    level_map = {
-        "👶 Начинающий": "beginner",
-        "👨‍🎓 Продолжающий": "intermediate",
-        "🏆 Продвинутый": "advanced"
-    }
-    
-    if message.text in level_map:
-        level = level_map[message.text]
-        success = await UserCRUD.update_user(
-            session=session,
-            telegram_id=message.from_user.id,
-            workout_level=level
-        )
-        if success:
-            await message.answer(f"✅ Уровень тренировок обновлен", reply_markup=get_main_menu())
-            await state.clear()
-        else:
-            await message.answer("❌ Ошибка обновления")
+async def process_level(message: Message, state: FSMContext, session: AsyncSession):
+    l_map = {"Начинающий": "beginner", "Продолжающий": "intermediate", "Продвинутый": "advanced"}
+    found = next((v for k, v in l_map.items() if k in message.text), None)
+    if found:
+        await UserCRUD.update_user(session, message.from_user.id, workout_level=found)
+        await message.answer("✅ Уровень обновлен", reply_markup=get_main_menu())
+        await state.clear()
     else:
-        await message.answer("❌ Выберите вариант из кнопок", reply_markup=get_workout_level_keyboard())
+        await message.answer("Выберите кнопку.")
 
 @router.message(UserForm.workout_days)
-async def process_workout_days(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработка дней тренировок"""
-    days_map = {
-        "2 дня": 2,
-        "3 дня": 3,
-        "4 дня": 4,
-        "5 дней": 5,
-        "6 дней": 6
-    }
-    
-    if message.text in days_map:
-        days = days_map[message.text]
-        success = await UserCRUD.update_user(
-            session=session,
-            telegram_id=message.from_user.id,
-            workout_days=days
-        )
-        if success:
-            await message.answer(f"✅ Дни тренировок обновлены: {days} дней/неделю", 
-                               reply_markup=get_main_menu())
-            await state.clear()
-        else:
-            await message.answer("❌ Ошибка обновления")
-    else:
-        await message.answer("❌ Выберите вариант из кнопок", reply_markup=get_workout_days_keyboard())
+async def process_days(message: Message, state: FSMContext, session: AsyncSession):
+    # Извлекаем число из строки "3 дня" -> 3
+    try:
+        days = int(''.join(filter(str.isdigit, message.text)))
+        await UserCRUD.update_user(session, message.from_user.id, workout_days=days)
+        await message.answer(f"✅ Дни: {days}", reply_markup=get_main_menu())
+        await state.clear()
+    except:
+        await message.answer("Выберите кнопку.")

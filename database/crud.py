@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from database.models import User
 
 class UserCRUD:
@@ -28,7 +28,6 @@ class UserCRUD:
     @staticmethod
     async def update_user(session: AsyncSession, telegram_id: int, **kwargs):
         """Обновить данные пользователя (Тихий режим)"""
-        # Фильтруем пустые значения
         clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
         result = await session.execute(
@@ -37,11 +36,9 @@ class UserCRUD:
         user = result.scalar_one_or_none()
         
         if user:
-            # Молча обновляем данные
             for key, value in clean_kwargs.items():
                 if hasattr(user, key):
                     setattr(user, key, value)
-            
             await session.commit()
             return True
         else:
@@ -60,3 +57,32 @@ class UserCRUD:
         """Получить всех пользователей (для рассылки)"""
         result = await session.execute(select(User))
         return result.scalars().all()
+
+    # --- 👇 НОВАЯ ФУНКЦИЯ СТАТИСТИКИ 👇 ---
+    @staticmethod
+    async def get_stats(session: AsyncSession):
+        """Собирает статистику по пользователям"""
+        # Всего пользователей
+        total_users = await session.scalar(select(func.count(User.telegram_id)))
+        
+        # Пользователей с заполненным весом (считаем их активными)
+        active_users = await session.scalar(
+            select(func.count(User.telegram_id)).where(User.weight.isnot(None))
+        )
+        
+        # Пользователей с программой тренировок
+        workout_users = await session.scalar(
+            select(func.count(User.telegram_id)).where(User.current_workout_program.isnot(None))
+        )
+        
+        # Пользователей с меню питания
+        nutrition_users = await session.scalar(
+            select(func.count(User.telegram_id)).where(User.current_nutrition_program.isnot(None))
+        )
+        
+        return {
+            "total": total_users,
+            "active": active_users,
+            "workouts": workout_users,
+            "nutrition": nutrition_users
+        }
