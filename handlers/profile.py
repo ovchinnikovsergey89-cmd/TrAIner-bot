@@ -30,30 +30,8 @@ ACTIVITY_MAP = {
 }
 STYLE_MAP = {"supportive": "🔥 Тони (Мотиватор)", "tough": "💀 Сержант", "scientific": "🧐 Доктор"}
 
-# Вшитая клавиатура стилей
-def get_personality_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🔥 Тони (Мотиватор)", callback_data="set_style_supportive"))
-    builder.row(InlineKeyboardButton(text="💀 Сержант (Жесткий)", callback_data="set_style_tough"))
-    builder.row(InlineKeyboardButton(text="🧐 Доктор (Научный)", callback_data="set_style_scientific"))
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="refresh_profile"))
-    return builder.as_markup()
-
-# --- 1. ОТОБРАЖЕНИЕ ПРОФИЛЯ ---
-# 🔥 ИСПРАВЛЕНО: Теперь ловим "👤 Профиль" (как в меню), а не шестеренку
-@router.message(F.text == "👤 Профиль") 
-@router.message(F.text == "⚙️ Профиль") # На всякий случай оставим и старый вариант
-@router.message(Command("profile"))
-@router.message(Command("edit"))
-async def show_profile(message: Message, session: AsyncSession, state: FSMContext):
-    await state.clear() # Сброс состояний
-    
-    user = await UserCRUD.get_user(session, message.from_user.id)
-    if not user:
-        await message.answer("Сначала пройдите регистрацию: /start")
-        return
-
-    # Подготовка данных для вывода
+# --- ФУНКЦИЯ ГЕНЕРАЦИИ ТЕКСТА ---
+def get_profile_text(user):
     txt_name = html.escape(user.name or "Атлет")
     txt_age = user.age or "-"
     txt_height = f"{user.height} см" if user.height else "-"
@@ -61,14 +39,12 @@ async def show_profile(message: Message, session: AsyncSession, state: FSMContex
     txt_gender = GENDER_MAP.get(user.gender, "-")
     txt_goal = GOAL_MAP.get(user.goal, "-")
     txt_level = LEVEL_MAP.get(user.workout_level, "-")
-    
     act_val = user.activity_level
     txt_activity = ACTIVITY_MAP.get(act_val, act_val) if act_val else "-"
-
     txt_days = f"{user.workout_days} дн/нед" if user.workout_days else "-"
     txt_style = STYLE_MAP.get(user.trainer_style, "🔥 Тони")
 
-    text = (
+    return (
         f"👤 <b>Профиль: {txt_name}</b>\n"
         f"──────────────────\n"
         f"🎂 <b>Возраст:</b> {txt_age} | {txt_gender}\n"
@@ -79,11 +55,48 @@ async def show_profile(message: Message, session: AsyncSession, state: FSMContex
         f"💪 <b>Уровень:</b> {txt_level}\n"
         f"📅 <b>Режим:</b> {txt_days}\n"
         f"──────────────────\n"
-        f"🎭 <b>Тренер:</b> {txt_style}\n\n"
-        f"👇 <i>Нажмите кнопку, чтобы изменить параметр:</i>"
+        f"🎭 <b>Тренер:</b> {txt_style}"
     )
 
-    # Клавиатура управления
+# --- 1. ПРОСМОТР ПРОФИЛЯ (Только чтение) ---
+@router.message(F.text == "👤 Профиль")
+@router.message(Command("profile"))
+async def show_profile_view(message: Message, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    user = await UserCRUD.get_user(session, message.from_user.id)
+    if not user:
+        await message.answer("Сначала пройдите регистрацию: /start")
+        return
+
+    text = get_profile_text(user)
+    
+    # Кнопка ведет в режим редактирования
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
+    
+    await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+# --- 2. МЕНЮ РЕДАКТИРОВАНИЯ (Сетка кнопок) ---
+@router.callback_query(F.data == "open_edit_menu")
+async def show_edit_menu(event, session: AsyncSession, state: FSMContext):
+    await state.clear()
+    
+    # Определяем, кто вызвал функцию (Message или Callback)
+    if isinstance(event, Message):
+        message = event
+        user_id = message.from_user.id
+        is_callback = False
+    else:
+        message = event.message
+        user_id = event.from_user.id
+        is_callback = True
+
+    user = await UserCRUD.get_user(session, user_id)
+    if not user: return
+
+    text = get_profile_text(user) + "\n\n👇 <b>Выберите параметр для изменения:</b>"
+
+    # Сетка кнопок
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text="⚖️ Вес", callback_data="prof_weight"),
@@ -102,69 +115,36 @@ async def show_profile(message: Message, session: AsyncSession, state: FSMContex
         InlineKeyboardButton(text="👫 Пол", callback_data="prof_gender"),
         InlineKeyboardButton(text="🎭 Тренер", callback_data="prof_style")
     )
-    kb.row(InlineKeyboardButton(text="🔄 Обновить данные", callback_data="refresh_profile"))
+    # Кнопка возврата к просмотру
+    kb.row(InlineKeyboardButton(text="✅ Готово (Закрыть)", callback_data="close_edit_menu"))
+
+    if is_callback:
+        await message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+
+# --- ВОЗВРАТ В ПРОСМОТР ---
+@router.callback_query(F.data == "close_edit_menu")
+async def close_edit(callback: CallbackQuery, session: AsyncSession):
+    user = await UserCRUD.get_user(session, callback.from_user.id)
+    text = get_profile_text(user)
     
-    await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
+    
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
-# --- 2. ОБРАБОТКА НАЖАТИЙ (Callback) ---
-
-@router.callback_query(F.data == "refresh_profile")
-async def cb_refresh(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    await callback.message.delete()
-    await show_profile(callback.message, session, state)
-
-# Числовые параметры
-@router.callback_query(F.data == "prof_weight")
-async def ask_weight(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("⚖️ Введите новый вес (кг):")
-    await state.set_state(EditForm.weight)
-    await callback.answer()
-
-@router.callback_query(F.data == "prof_height")
-async def ask_height(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("📏 Введите новый рост (см):")
-    await state.set_state(EditForm.height)
-    await callback.answer()
-
-@router.callback_query(F.data == "prof_age")
-async def ask_age(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("🎂 Введите новый возраст:")
-    await state.set_state(EditForm.age)
-    await callback.answer()
-
-# Параметры с выбором
-@router.callback_query(F.data == "prof_goal")
-async def ask_goal(callback: CallbackQuery):
-    await callback.message.delete()
-    await callback.message.answer("🎯 Выберите цель:", reply_markup=get_goal_keyboard())
-
-@router.callback_query(F.data == "prof_activity")
-async def ask_activity(callback: CallbackQuery):
-    await callback.message.delete()
-    await callback.message.answer("🏃 Выберите активность:", reply_markup=get_activity_keyboard())
-
-@router.callback_query(F.data == "prof_level")
-async def ask_level(callback: CallbackQuery):
-    await callback.message.delete()
-    await callback.message.answer("💪 Выберите уровень:", reply_markup=get_workout_level_keyboard())
-
-@router.callback_query(F.data == "prof_days")
-async def ask_days(callback: CallbackQuery):
-    await callback.message.delete()
-    await callback.message.answer("📅 Дней в неделю:", reply_markup=get_workout_days_keyboard())
-
-@router.callback_query(F.data == "prof_gender")
-async def ask_gender(callback: CallbackQuery):
-    await callback.message.delete()
-    await callback.message.answer("👫 Ваш пол:", reply_markup=get_gender_keyboard())
-
-@router.callback_query(F.data == "prof_style")
-async def ask_style(callback: CallbackQuery):
-    await callback.message.edit_text("🎭 Выберите характер тренера:", reply_markup=get_personality_keyboard())
-
-# --- 3. СОХРАНЕНИЕ ДАННЫХ ---
+# --- 3. ЛОГИКА ВВОДА ---
+# Помощник: после изменения возвращаем в МЕНЮ РЕДАКТИРОВАНИЯ
+async def return_to_edit(message: Message, session: AsyncSession, state: FSMContext):
+    await show_edit_menu(message, session, state)
 
 # Числа
+@router.callback_query(F.data == "prof_weight")
+async def ask_weight(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("⚖️ Введите новый вес (кг):")
+    await state.set_state(EditForm.weight)
+
 @router.message(EditForm.weight)
 async def save_weight(message: Message, state: FSMContext, session: AsyncSession):
     try:
@@ -172,9 +152,14 @@ async def save_weight(message: Message, state: FSMContext, session: AsyncSession
         if 30 <= val <= 250:
             await UserCRUD.update_user(session, message.from_user.id, weight=val)
             await message.answer("✅ Вес сохранен.")
-            await show_profile(message, session, state)
+            await return_to_edit(message, session, state)
         else: await message.answer("❌ Введите реальный вес (30-250).")
     except: await message.answer("❌ Введите число.")
+
+@router.callback_query(F.data == "prof_height")
+async def ask_height(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("📏 Введите новый рост (см):")
+    await state.set_state(EditForm.height)
 
 @router.message(EditForm.height)
 async def save_height(message: Message, state: FSMContext, session: AsyncSession):
@@ -183,26 +168,41 @@ async def save_height(message: Message, state: FSMContext, session: AsyncSession
         if 100 <= val <= 250:
             await UserCRUD.update_user(session, message.from_user.id, height=val)
             await message.answer("✅ Рост сохранен.")
-            await show_profile(message, session, state)
+            await return_to_edit(message, session, state)
         else: await message.answer("❌ Введите реальный рост (100-250).")
     except: await message.answer("❌ Введите число.")
+
+@router.callback_query(F.data == "prof_age")
+async def ask_age(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("🎂 Введите новый возраст:")
+    await state.set_state(EditForm.age)
 
 @router.message(EditForm.age)
 async def save_age(message: Message, state: FSMContext, session: AsyncSession):
     if message.text.isdigit() and 10 <= int(message.text) <= 100:
         await UserCRUD.update_user(session, message.from_user.id, age=int(message.text))
         await message.answer("✅ Возраст сохранен.")
-        await show_profile(message, session, state)
+        await return_to_edit(message, session, state)
     else: await message.answer("❌ Введите число (10-100).")
 
-# Текстовые кнопки
+# Кнопки выбора (Цель, Активность...)
+@router.callback_query(F.data == "prof_goal")
+async def ask_goal(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer("🎯 Выберите цель:", reply_markup=get_goal_keyboard())
+
 @router.message(F.text.in_(GOAL_MAP.values()))
 async def save_goal(message: Message, session: AsyncSession, state: FSMContext):
     code = next((k for k, v in GOAL_MAP.items() if v == message.text), None)
     if code:
         await UserCRUD.update_user(session, message.from_user.id, goal=code)
         await message.answer("✅ Цель обновлена.", reply_markup=get_main_menu())
-        await show_profile(message, session, state)
+        await return_to_edit(message, session, state)
+
+@router.callback_query(F.data == "prof_activity")
+async def ask_activity(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer("🏃 Выберите активность:", reply_markup=get_activity_keyboard())
 
 @router.message(F.text.in_(ACTIVITY_MAP.values()) | F.text.contains("Сидячий") | F.text.contains("Малая") | F.text.contains("Средняя") | F.text.contains("Высокая"))
 async def save_activity(message: Message, session: AsyncSession, state: FSMContext):
@@ -211,27 +211,28 @@ async def save_activity(message: Message, session: AsyncSession, state: FSMConte
     elif "Средняя" in message.text: val = "moderate"
     elif "Высокая" in message.text: val = "high"
     elif "Экстремальная" in message.text: val = "extreme"
-    
     await UserCRUD.update_user(session, message.from_user.id, activity_level=val)
     await message.answer("✅ Активность обновлена.", reply_markup=get_main_menu())
-    await show_profile(message, session, state)
+    await return_to_edit(message, session, state)
+
+@router.callback_query(F.data == "prof_level")
+async def ask_level(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer("💪 Выберите уровень:", reply_markup=get_workout_level_keyboard())
 
 @router.message(F.text.in_(LEVEL_MAP.values()) | F.text.contains("Начинающий") | F.text.contains("Любитель") | F.text.contains("Продвинутый") | F.text.contains("Новичок"))
 async def save_level(message: Message, session: AsyncSession, state: FSMContext):
     code = "beginner"
     if "Любитель" in message.text or "Продолжающий" in message.text: code = "intermediate"
     elif "ПРО" in message.text or "Продвинутый" in message.text: code = "advanced"
-    
     await UserCRUD.update_user(session, message.from_user.id, workout_level=code)
     await message.answer("✅ Уровень обновлен.", reply_markup=get_main_menu())
-    await show_profile(message, session, state)
+    await return_to_edit(message, session, state)
 
-@router.message(F.text.in_(GENDER_MAP.values()))
-async def save_gender(message: Message, session: AsyncSession, state: FSMContext):
-    code = "male" if "Мужской" in message.text else "female"
-    await UserCRUD.update_user(session, message.from_user.id, gender=code)
-    await message.answer("✅ Пол обновлен.", reply_markup=get_main_menu())
-    await show_profile(message, session, state)
+@router.callback_query(F.data == "prof_days")
+async def ask_days(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer("📅 Дней в неделю:", reply_markup=get_workout_days_keyboard())
 
 @router.message(F.text.contains("дн") | F.text.regexp(r'^\d+$'))
 async def save_days(message: Message, session: AsyncSession, state: FSMContext):
@@ -240,13 +241,37 @@ async def save_days(message: Message, session: AsyncSession, state: FSMContext):
         if 1 <= d <= 7:
             await UserCRUD.update_user(session, message.from_user.id, workout_days=d)
             await message.answer(f"✅ Дней в неделю: {d}", reply_markup=get_main_menu())
-            await show_profile(message, session, state)
+            await return_to_edit(message, session, state)
     except: pass
+
+@router.callback_query(F.data == "prof_gender")
+async def ask_gender(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer("👫 Ваш пол:", reply_markup=get_gender_keyboard())
+
+@router.message(F.text.in_(GENDER_MAP.values()))
+async def save_gender(message: Message, session: AsyncSession, state: FSMContext):
+    code = "male" if "Мужской" in message.text else "female"
+    await UserCRUD.update_user(session, message.from_user.id, gender=code)
+    await message.answer("✅ Пол обновлен.", reply_markup=get_main_menu())
+    await return_to_edit(message, session, state)
+
+# Стиль (Inline, возвращает в show_edit_menu)
+def get_style_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔥 Тони", callback_data="set_style_supportive"))
+    builder.row(InlineKeyboardButton(text="💀 Сержант", callback_data="set_style_tough"))
+    builder.row(InlineKeyboardButton(text="🧐 Доктор", callback_data="set_style_scientific"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="open_edit_menu"))
+    return builder.as_markup()
+
+@router.callback_query(F.data == "prof_style")
+async def ask_style(callback: CallbackQuery):
+    await callback.message.edit_text("🎭 Выберите характер тренера:", reply_markup=get_style_keyboard())
 
 @router.callback_query(F.data.startswith("set_style_"))
 async def save_style(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     style = callback.data.replace("set_style_", "")
     await UserCRUD.update_user(session, callback.from_user.id, trainer_style=style)
-    await callback.message.delete()
-    await callback.message.answer("✅ Характер тренера изменен!", reply_markup=get_main_menu())
-    await show_profile(callback.message, session, state)
+    # Возвращаемся в меню редактирования
+    await show_edit_menu(callback, session, state)

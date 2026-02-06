@@ -39,8 +39,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     user = result.scalar_one_or_none()
     
     if user:
-        # 🔥 ИСПРАВЛЕНИЕ 1: Берем user.name вместо user.first_name
-        # Если в базе имени нет, берем из телеграма
+        # 🔥 ИСПРАВЛЕНИЕ: Используем user.name (как в базе), а не first_name
         db_name = user.name if user.name else message.from_user.first_name
         safe_name = html.escape(db_name)
         
@@ -54,14 +53,9 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         # Если нет — запускаем регистрацию
         await start_registration(message, state)
 
-# --- 2. КНОПКА "ИЗМЕНИТЬ ДАННЫЕ" ---
-@router.message(F.text == "🔄 Изменить данные")
-async def btn_change_data(message: Message, state: FSMContext):
-    """Запускает опрос заново принудительно"""
-    await message.answer("Хорошо, давайте обновим ваши параметры.", reply_markup=ReplyKeyboardRemove())
-    await start_registration(message, state)
+# --- (БЛОК "ИЗМЕНИТЬ ДАННЫЕ" УДАЛЕН) ---
 
-# --- 3. ЛОГИКА РЕГИСТРАЦИИ (АНКЕТА) ---
+# --- 2. ЛОГИКА РЕГИСТРАЦИИ (АНКЕТА) ---
 
 async def start_registration(message: Message, state: FSMContext):
     await message.answer(
@@ -106,7 +100,7 @@ async def process_weight(message: Message, state: FSMContext):
     try:
         text = message.text.replace(',', '.')
         weight = float(text)
-        if not (30 <= weight <= 250): raise ValueError # Чуть расширил диапазон до 250
+        if not (30 <= weight <= 250): raise ValueError
         
         await state.update_data(weight=weight)
         await message.answer("Ваш рост (в см)?")
@@ -117,12 +111,12 @@ async def process_weight(message: Message, state: FSMContext):
 @router.message(UserForm.height)
 async def process_height(message: Message, state: FSMContext):
     try:
-        # Обработка если введут не целое число случайно
+        # Добавил защиту от float ввода роста
         height = float(message.text.replace(',', '.'))
         if not (100 <= height <= 250):
             await message.answer("Введите реальный рост (в см).")
             return
-            
+        
         await state.update_data(height=height)
         await message.answer("Какой у вас уровень активности?", reply_markup=get_activity_keyboard())
         await state.set_state(UserForm.activity_level)
@@ -139,10 +133,9 @@ async def process_activity(message: Message, state: FSMContext):
         "Экстремальная (физ. труд)": "extreme"
     }
     
-    # Пытаемся найти точное совпадение или частичное
     selected_code = None
     for key, value in activity_map.items():
-        if key in message.text: # Если текст кнопки содержится в сообщении
+        if key in message.text:
             selected_code = value
             break
             
@@ -200,13 +193,11 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
     if days < 1: days = 1
     if days > 7: days = 7
     
-    # 1. Получаем все данные
     data = await state.get_data()
     data['workout_days'] = days
     telegram_id = message.from_user.id
     first_name = message.from_user.first_name
     
-    # 2. Сохраняем в БД
     result = await session.execute(select(User).filter_by(telegram_id=telegram_id))
     user = result.scalar_one_or_none()
     
@@ -214,7 +205,7 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
         user = User(telegram_id=telegram_id)
         session.add(user)
     
-    # 🔥 ИСПРАВЛЕНИЕ 2: Записываем имя в поле .name (а не .first_name)
+    # 🔥 ИСПРАВЛЕНИЕ: Записываем имя в правильное поле .name
     user.name = first_name
     
     user.gender = data.get('gender')
@@ -228,10 +219,8 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
     
     await session.commit()
     
-    # 3. Финиш
     await state.clear()
     safe_name = html.escape(first_name)
-    
     summary = (
         f"✅ <b>Профиль успешно создан!</b>\n\n"
         f"👤 Имя: {safe_name}\n"
