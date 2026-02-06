@@ -12,7 +12,7 @@ from sqlalchemy import select
 from states.user_states import UserForm
 from database.models import User
 
-# Импортируем клавиатуры из ИСПРАВЛЕННОГО файла
+# Импортируем клавиатуры
 from keyboards.builders import (
     get_gender_keyboard,
     get_activity_keyboard,
@@ -39,8 +39,11 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     user = result.scalar_one_or_none()
     
     if user:
-        # Если есть — просто приветствуем
-        safe_name = html.escape(user.first_name or message.from_user.first_name)
+        # 🔥 ИСПРАВЛЕНИЕ 1: Берем user.name вместо user.first_name
+        # Если в базе имени нет, берем из телеграма
+        db_name = user.name if user.name else message.from_user.first_name
+        safe_name = html.escape(db_name)
+        
         await message.answer(
             f"👋 С возвращением, <b>{safe_name}</b>!\n"
             f"Готов продолжить тренировки? 👇",
@@ -103,7 +106,7 @@ async def process_weight(message: Message, state: FSMContext):
     try:
         text = message.text.replace(',', '.')
         weight = float(text)
-        if not (30 <= weight <= 200): raise ValueError
+        if not (30 <= weight <= 250): raise ValueError # Чуть расширил диапазон до 250
         
         await state.update_data(weight=weight)
         await message.answer("Ваш рост (в см)?")
@@ -113,22 +116,21 @@ async def process_weight(message: Message, state: FSMContext):
 
 @router.message(UserForm.height)
 async def process_height(message: Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("Введите рост целым числом (например: 180).")
-        return
-    
-    height = int(message.text)
-    if not (100 <= height <= 250):
-        await message.answer("Введите реальный рост (в см).")
-        return
-        
-    await state.update_data(height=height)
-    await message.answer("Какой у вас уровень активности?", reply_markup=get_activity_keyboard())
-    await state.set_state(UserForm.activity_level)
+    try:
+        # Обработка если введут не целое число случайно
+        height = float(message.text.replace(',', '.'))
+        if not (100 <= height <= 250):
+            await message.answer("Введите реальный рост (в см).")
+            return
+            
+        await state.update_data(height=height)
+        await message.answer("Какой у вас уровень активности?", reply_markup=get_activity_keyboard())
+        await state.set_state(UserForm.activity_level)
+    except ValueError:
+        await message.answer("Введите рост числом.")
 
 @router.message(UserForm.activity_level)
 async def process_activity(message: Message, state: FSMContext):
-    # Карта перевода текста кнопки в код для БД
     activity_map = {
         "Сидячий (без спорта)": "sedentary", 
         "Малая (1-3 тренировки)": "light",
@@ -137,10 +139,10 @@ async def process_activity(message: Message, state: FSMContext):
         "Экстремальная (физ. труд)": "extreme"
     }
     
+    # Пытаемся найти точное совпадение или частичное
     selected_code = None
-    # Ищем совпадение текста кнопки с ключом словаря
     for key, value in activity_map.items():
-        if key in message.text:
+        if key in message.text: # Если текст кнопки содержится в сообщении
             selected_code = value
             break
             
@@ -188,7 +190,6 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
     text = message.text
     days = 3
     
-    # Парсим число дней из текста (например "3 дня" -> 3)
     if text.isdigit():
         days = int(text)
     else:
@@ -199,13 +200,13 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
     if days < 1: days = 1
     if days > 7: days = 7
     
-    # 1. Получаем все данные из машины состояний
+    # 1. Получаем все данные
     data = await state.get_data()
     data['workout_days'] = days
     telegram_id = message.from_user.id
     first_name = message.from_user.first_name
     
-    # 2. Сохраняем в Базу Данных (обновляем или создаем)
+    # 2. Сохраняем в БД
     result = await session.execute(select(User).filter_by(telegram_id=telegram_id))
     user = result.scalar_one_or_none()
     
@@ -213,8 +214,9 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
         user = User(telegram_id=telegram_id)
         session.add(user)
     
-    # Обновляем поля пользователя
-    user.first_name = first_name
+    # 🔥 ИСПРАВЛЕНИЕ 2: Записываем имя в поле .name (а не .first_name)
+    user.name = first_name
+    
     user.gender = data.get('gender')
     user.age = data.get('age')
     user.weight = data.get('weight')
@@ -229,11 +231,12 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
     # 3. Финиш
     await state.clear()
     safe_name = html.escape(first_name)
+    
     summary = (
         f"✅ <b>Профиль успешно создан!</b>\n\n"
         f"👤 Имя: {safe_name}\n"
         f"📊 Вес: {data.get('weight')} кг\n"
-        f"🎯 Цель: {message.text} (дней: {days})\n\n"
+        f"🎯 Цель: {data.get('goal')} (дней: {days})\n\n"
         f"Теперь вам доступны все функции бота! 👇"
     )
     await message.answer(summary, reply_markup=get_main_menu(), parse_mode=ParseMode.HTML)
