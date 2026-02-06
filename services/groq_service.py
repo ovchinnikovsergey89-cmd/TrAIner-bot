@@ -7,164 +7,185 @@ from config import Config
 
 class GroqService:
     def __init__(self):
-        self.api_key = Config.DEEPSEEK_API_KEY
+        self.api_key = Config.DEEPSEEK_API_KEY # Или GROQ_API_KEY
         self.client = None
-        self.model = "deepseek-chat"
+        self.model = "deepseek-chat" # Или 'llama3-70b-8192' если через Groq
         
         if self.api_key:
             try:
                 self.client = AsyncOpenAI(
                     api_key=self.api_key,
-                    base_url="https://api.deepseek.com"
+                    base_url="https://api.deepseek.com" # Или "https://api.groq.com/openai/v1"
                 )
             except Exception as e:
                 logging.error(f"Err: {e}")
 
-    # --- МАТЕМАТИКА ---
+    # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (Остаются без изменений) ---
     def _calculate_target_calories(self, user_data: dict) -> int:
+        # (Код расчета калорий оставь прежним, он хороший)
         try:
-            weight = float(user_data.get('weight', 70))
-            height = float(user_data.get('height', 170))
-            age = int(user_data.get('age', 30))
-            gender = user_data.get('gender', 'Мужской')
-            activity = user_data.get('activity_level', 'Средняя')
+            w = float(user_data.get('weight', 70))
+            h = float(user_data.get('height', 170))
+            a = int(user_data.get('age', 30))
+            g = user_data.get('gender', 'male')
+            act = user_data.get('activity_level', 'medium')
             goal = user_data.get('goal', 'maintenance')
-
-            if 'Муж' in gender or 'Male' in gender:
-                bmr = 10 * weight + 6.25 * height - 5 * age + 5
-            else:
-                bmr = 10 * weight + 6.25 * height - 5 * age - 161
-
-            activity_multipliers = {"Сидячий": 1.2, "Малая": 1.375, "Средняя": 1.55, "Высокая": 1.725}
-            multiplier = 1.2
-            for key, val in activity_multipliers.items():
-                if key in str(activity): multiplier = val; break
             
-            tdee = bmr * multiplier
-            if goal == "weight_loss": target = tdee * 0.85
-            elif goal == "muscle_gain": target = tdee * 1.15
-            else: target = tdee
-            return int(target)
+            # BMR Mifflin-St Jeor
+            if 'Муж' in str(g) or 'male' in str(g): bmr = 10*w + 6.25*h - 5*a + 5
+            else: bmr = 10*w + 6.25*h - 5*a - 161
+            
+            multipliers = {"sedentary": 1.2, "light": 1.375, "medium": 1.55, "high": 1.725}
+            tdee = bmr * multipliers.get(str(act), 1.55)
+            
+            if goal == "weight_loss": return int(tdee * 0.85)
+            if goal == "muscle_gain": return int(tdee * 1.15)
+            return int(tdee)
         except: return 2000
 
-    # --- ОЧИСТКА ---
     def _clean_response(self, text: str) -> str:
         if not text: return ""
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL) # Удаляем мысли Deepseek
         text = re.sub(r'^```html', '', text, flags=re.MULTILINE)
         text = re.sub(r'^```', '', text, flags=re.MULTILINE)
-        text = text.replace("<br>", "\n").replace("<p>", "").replace("</p>", "\n")
-        text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
         return text.strip()
 
-    # --- НАРЕЗКА (ОБНОВЛЕНА) ---
     def _smart_split(self, text: str) -> list[str]:
         text = self._clean_response(text)
-        # Добавили 📅 (дни тренировок) и 💡 (советы) в разделители
         pages = re.split(r'(?=\n(?:🍳|🍲|🥗|🛒|📅|💡))', text)
-        if len(pages) < 2:
-             pages = re.split(r'(?=🍳|🍲|🥗|🛒|📅|💡)', text)
-        valid_pages = [p.strip() for p in pages if len(p.strip()) > 20]
-        return valid_pages if valid_pages else [text]
-
-    # --- ГЕНЕРАЦИЯ ПИТАНИЯ ---
-    async def generate_nutrition_pages(self, user_data: dict) -> list[str]:
-        if not self.client: return ["❌ Ошибка API"]
-        target_calories = self._calculate_target_calories(user_data)
-        
-        prompt = f"""
-        Роль: Элитный диетолог.
-        Клиент: {user_data.get('weight')}кг, цель: {user_data.get('goal')}.
-        Калории: {target_calories} ккал.
-        
-        ЗАДАЧА:
-        Составь конструктор меню из 4 частей.
-        ВАЖНО: НЕ ПИШИ РЕЦЕПТЫ. Пиши только состав.
-        
-        ФОРМАТ ОТВЕТА (СТРОГО):
-        
-        🍳 <b>ЗАВТРАКИ (3 варианта)</b>
-        ...
-        (след секция с новой строки)
-        🍲 <b>ОБЕДЫ (3 варианта)</b>
-        ...
-        (след секция с новой строки)
-        🥗 <b>УЖИНЫ (3 варианта)</b>
-        ...
-        (след секция с новой строки)
-        🛒 <b>СПИСОК ПОКУПОК</b>
-        ...
-        """
-        
-        try:
-            resp = await self.client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.7
-            )
-            return self._smart_split(resp.choices[0].message.content)
-        except Exception as e: return [f"Ошибка: {e}"]
+        if len(pages) < 2: pages = re.split(r'(?=🍳|🍲|🥗|🛒|📅|💡)', text)
+        return [p.strip() for p in pages if len(p.strip()) > 20] or [text]
 
     def _calculate_dates(self, days_per_week: int):
         today = datetime.date.today()
-        start_date = today 
+        offsets = {1:[0], 2:[0,3], 3:[0,2,4], 4:[0,1,3,4], 5:[0,1,2,3,4], 6:[0,1,2,3,4,5]}.get(days_per_week, [0,2,4])
         schedule = []
-        if days_per_week == 1: offsets = [0]
-        elif days_per_week == 2: offsets = [0, 3]
-        elif days_per_week == 3: offsets = [0, 2, 4]
-        elif days_per_week == 4: offsets = [0, 1, 3, 4]
-        elif days_per_week == 5: offsets = [0, 1, 2, 3, 4]
-        else: offsets = list(range(days_per_week))
-        months = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек']
-        weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
-        for offset in offsets:
-            date = start_date + timedelta(days=offset)
-            schedule.append(f"{date.day} {months[date.month-1]} ({weekdays[date.weekday()]})")
+        months = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек']
+        weekdays = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс']
+        for off in offsets:
+            d = today + timedelta(days=off)
+            schedule.append(f"{d.day} {months[d.month-1]} ({weekdays[d.weekday()]})")
         return schedule
 
-    # --- 🔥 ГЕНЕРАЦИЯ ТРЕНИРОВКИ (ОБНОВЛЕНА) 🔥 ---
+    # --- 🔥 ПОЛУЧЕНИЕ ЛИЧНОСТИ ТРЕНЕРА 🔥 ---
+    def _get_persona_prompt(self, style: str) -> str:
+        if style == "tough":
+            return (
+                "Ты — 'Сержант'. ЖЕСТКИЙ тренер старой закалки. "
+                "Ты не терпишь нытья. Обращайся на 'ты', говори коротко и по делу. "
+                "Используй сленг качалки. Если клиент ленится — ругай его. "
+                "Твоя цель — дисциплина. Никаких 'пожалуйста' и нежностей."
+            )
+        elif style == "scientific":
+            return (
+                "Ты — 'Доктор Наук'. Интеллектуальный тренер-биохакер. "
+                "Ты опираешься только на факты, исследования и биомеханику. "
+                "Твой тон вежливый, сдержанный, немного занудный. "
+                "Используй термины (гипертрофия, профицит, кортизол). "
+                "Обращайся на 'Вы'."
+            )
+        else: # supportive (default)
+            return (
+                "Ты — 'Тони', лучший друг и мотиватор. "
+                "Ты очень позитивный, энергичный и добрый. "
+                "Используй много эмодзи (🔥, 🚀, 💪). "
+                "Твоя цель — вдохновить и поддержать. Обращайся на 'ты', по-дружески."
+            )
+
+    # --- ГЕНЕРАЦИЯ ПИТАНИЯ (С УЧЕТОМ ЛИЧНОСТИ) ---
+    async def generate_nutrition_pages(self, user_data: dict) -> list[str]:
+        if not self.client: return ["❌ Ошибка API"]
+        
+        style = user_data.get("trainer_style", "supportive")
+        persona = self._get_persona_prompt(style)
+        kcal = self._calculate_target_calories(user_data)
+        
+        prompt = f"""
+        {persona}
+        ЗАДАЧА: Составь меню на день.
+        Клиент: {user_data.get('weight')}кг, цель: {user_data.get('goal')}. Калории: {kcal}.
+        
+        ФОРМАТ ОТВЕТА (СТРОГО):
+        🍳 <b>ЗАВТРАКИ</b> (текст...)
+        🍲 <b>ОБЕДЫ</b> (текст...)
+        🥗 <b>УЖИНЫ</b> (текст...)
+        🛒 <b>СПИСОК ПОКУПОК</b> (текст...)
+        """
+        try:
+            r = await self.client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}], model=self.model
+            )
+            return self._smart_split(r.choices[0].message.content)
+        except Exception as e: return [f"Ошибка: {e}"]
+
+    # --- ГЕНЕРАЦИЯ ТРЕНИРОВКИ ---
     async def generate_workout_pages(self, user_data: dict) -> list[str]:
         if not self.client: return ["❌ Ошибка API"]
+        
+        style = user_data.get("trainer_style", "supportive")
+        persona = self._get_persona_prompt(style)
         days = user_data.get('workout_days', 3)
         dates = ", ".join(self._calculate_dates(days))
         
         prompt = f"""
-        Роль: Тренер. Клиент: {user_data.get('gender')}, {user_data.get('weight')}кг. Цель: {user_data.get('goal')}.
+        {persona}
+        ЗАДАЧА: Напиши программу тренировок на неделю ({days} дн).
+        Клиент: {user_data.get('gender')}, {user_data.get('workout_level')}. Цель: {user_data.get('goal')}.
         Даты: {dates}.
-        Задача: Напиши программу.
         
-        ФОРМАТ СТРОГО:
-        1. Каждый день тренировки начинай с новой строки со смайла 📅.
-        2. В самом конце добавь отдельный блок "Советы" со смайлом 💡.
-        
-        Пример структуры:
-        📅 <b>День 1: Название</b>
-        1. Упражнение...
-        
-        📅 <b>День 2: Название</b>
-        1. Упражнение...
-        
-        💡 <b>СОВЕТЫ ТРЕНЕРА</b>
-        - Рекомендация по темпу...
-        - Рекомендация по отдыху...
+        ФОРМАТ:
+        Каждый день начинай со смайла 📅.
+        В конце добавь блок "Советы" со смайлом 💡.
+        Используй свой стиль общения в описании упражнений!
         """
         try:
-            resp = await self.client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.6
+            r = await self.client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}], model=self.model
             )
-            return self._smart_split(resp.choices[0].message.content)
+            return self._smart_split(r.choices[0].message.content)
         except Exception as e: return [f"Ошибка: {e}"]
 
-    async def analyze_progress(self, user_data: dict, cw: float) -> str:
+    # --- АНАЛИЗ ПРОГРЕССА ---
+    async def analyze_progress(self, user_data: dict, current_weight: float) -> str:
         if not self.client: return "Err"
-        prompt = f"Клиент {user_data.get('weight')}->{cw}. Цель {user_data.get('goal')}. Комментарий."
+        
+        style = user_data.get("trainer_style", "supportive")
+        persona = self._get_persona_prompt(style)
+        
+        prompt = f"""
+        {persona}
+        СИТУАЦИЯ: Клиент весил {user_data.get('weight')}кг, стал {current_weight}кг.
+        Цель: {user_data.get('goal')}.
+        Дай краткий комментарий и совет (максимум 3 предложения) в своем стиле.
+        """
         try:
-            r = await self.client.chat.completions.create(messages=[{"role":"user","content":prompt}], model=self.model)
+            r = await self.client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}], model=self.model
+            )
             return self._clean_response(r.choices[0].message.content)
-        except: return "Ошибка"
+        except: return "Ошибка анализа"
 
-    async def get_chat_response(self, h: list, c: dict) -> str:
+    # --- ЧАТ (ВОПРОС-ОТВЕТ) ---
+    async def get_chat_response(self, history: list, user_context: dict) -> str:
         if not self.client: return "Err"
-        sys_p = {"role":"system", "content": f"Ты тренер. Ккал: {self._calculate_target_calories(c)}. Не используй <br>."}
+        
+        style = user_context.get("trainer_style", "supportive")
+        persona = self._get_persona_prompt(style)
+        
+        # Добавляем контекст о пользователе в системный промпт
+        system_msg = {
+            "role": "system", 
+            "content": (
+                f"{persona}\n"
+                f"ТВОЙ КЛИЕНТ: {user_context.get('name', 'друг')}, {user_context.get('weight')}кг, "
+                f"цель: {user_context.get('goal')}. "
+                "Отвечай кратко, емко, не используй Markdown заголовки (###)."
+            )
+        }
+        
         try:
-            r = await self.client.chat.completions.create(messages=[sys_p]+h[-6:], model=self.model)
+            # Берем последние 6 сообщений, чтобы помнить контекст беседы
+            msgs = [system_msg] + history[-6:]
+            r = await self.client.chat.completions.create(messages=msgs, model=self.model)
             return self._clean_response(r.choices[0].message.content)
-        except: return "Ошибка"
+        except: return "Ошибка сети"

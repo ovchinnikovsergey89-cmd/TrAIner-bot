@@ -7,18 +7,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from states.user_states import UserForm
 from database.crud import UserCRUD
-from keyboards import (
+from keyboards.settings import get_personality_keyboard
+from keyboards.main_menu import get_main_menu
+from keyboards.builders import (
     get_gender_keyboard,
     get_activity_keyboard,
     get_goal_keyboard,
     get_workout_level_keyboard,
-    get_workout_days_keyboard,
-    get_main_menu
+    get_workout_days_keyboard
 )
 
 router = Router()
 
-# --- КЛАВИАТУРА МЕНЮ РЕДАКТИРОВАНИЯ ---
+# --- МЕНЮ РЕДАКТИРОВАНИЯ ---
 def get_edit_keyboard():
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -37,90 +38,112 @@ def get_edit_keyboard():
         InlineKeyboardButton(text="💪 Уровень", callback_data="edit_level"),
         InlineKeyboardButton(text="📅 Дни трен.", callback_data="edit_days")
     )
-    builder.row(InlineKeyboardButton(text="🔙 Закончить редактирование", callback_data="cancel_edit"))
+    # 🔥 КНОПКА СТИЛЯ ТРЕНЕРА 🔥
+    builder.row(InlineKeyboardButton(text="🎭 Стиль Тренера", callback_data="edit_style"))
+    
+    builder.row(InlineKeyboardButton(text="🔙 Закончить", callback_data="cancel_edit"))
     return builder.as_markup()
 
-# ========== ЗАПУСК РЕДАКТИРОВАНИЯ ==========
-
+# ========== ЗАПУСК ==========
 @router.message(Command("edit"))
-@router.message(F.text == "⚙️ Профиль") # Если вдруг добавишь такую кнопку
+@router.message(F.text == "⚙️ Профиль")
 async def cmd_edit(message: Message):
-    """Показывает меню редактирования"""
     await message.answer(
-        "📝 <b>Редактирование профиля</b>\n\n"
-        "Выберите, что хотите изменить:",
+        "📝 <b>Редактирование профиля</b>\nВыберите пункт:",
         reply_markup=get_edit_keyboard(),
         parse_mode="HTML"
     )
 
-# ========== ОБРАБОТКА КНОПОК МЕНЮ ==========
+# ========== ОБРАБОТКА СТИЛЯ ТРЕНЕРА ==========
+@router.callback_query(F.data == "edit_style")
+async def cb_edit_style(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🎭 <b>Выберите характер тренера:</b>",
+        reply_markup=get_personality_keyboard(),
+        parse_mode="HTML"
+    )
 
+@router.callback_query(F.data.startswith("set_style_"))
+async def cb_set_style(callback: CallbackQuery, session: AsyncSession):
+    new_style = callback.data.replace("set_style_", "")
+    await UserCRUD.update_user(session, callback.from_user.id, trainer_style=new_style)
+    
+    names = {"supportive": "🔥 Тони", "tough": "💀 Сержант", "scientific": "🧐 Доктор"}
+    
+    # 🔥 ИСПРАВЛЕНИЕ: Удаляем старое сообщение и шлем новое, 
+    # так как get_main_menu() возвращает Reply-клавиатуру (которую нельзя вставить в edit_text)
+    await callback.message.delete()
+    await callback.message.answer(
+        f"✅ Тренер теперь: <b>{names.get(new_style)}</b>",
+        reply_markup=get_main_menu(),
+        parse_mode="HTML"
+    )
+
+# ========== ОСТАЛЬНЫЕ КНОПКИ ==========
 @router.callback_query(F.data == "edit_age")
 async def cb_edit_age(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("🎂 Введите новый <b>возраст</b> (числом):", parse_mode="HTML")
+    await callback.message.edit_text("🎂 Введите возраст:", parse_mode="HTML")
     await state.set_state(UserForm.age)
 
 @router.callback_query(F.data == "edit_weight")
 async def cb_edit_weight(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("⚖️ Введите новый <b>вес</b> (в кг):", parse_mode="HTML")
+    await callback.message.edit_text("⚖️ Введите вес (кг):", parse_mode="HTML")
     await state.set_state(UserForm.weight)
 
 @router.callback_query(F.data == "edit_height")
 async def cb_edit_height(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("📏 Введите новый <b>рост</b> (в см):", parse_mode="HTML")
+    await callback.message.edit_text("📏 Введите рост (см):", parse_mode="HTML")
     await state.set_state(UserForm.height)
 
 @router.callback_query(F.data == "edit_gender")
 async def cb_edit_gender(callback: CallbackQuery, state: FSMContext):
+    # Тут тоже используем answer + delete, так как get_gender_keyboard может быть Reply (проверьте builders.py)
+    # Но если get_gender_keyboard - Inline, то можно edit_text. 
+    # Для безопасности лучше использовать answer, если там кнопки ответа.
+    # Если у вас там Inline кнопки - оставьте edit_text, но если Reply - замените на логику ниже.
+    # По умолчанию в проекте это были Reply кнопки, так что меняем:
+    await callback.message.delete()
     await callback.message.answer("👫 Выберите пол:", reply_markup=get_gender_keyboard())
-    await callback.message.delete() # Удаляем старое меню для красоты
     await state.set_state(UserForm.gender)
 
 @router.callback_query(F.data == "edit_activity")
 async def cb_edit_activity(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("🏃 Выберите активность:", reply_markup=get_activity_keyboard())
     await callback.message.delete()
+    await callback.message.answer("🏃 Выберите активность:", reply_markup=get_activity_keyboard())
     await state.set_state(UserForm.activity_level)
 
 @router.callback_query(F.data == "edit_goal")
 async def cb_edit_goal(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("🎯 Выберите цель:", reply_markup=get_goal_keyboard())
     await callback.message.delete()
+    await callback.message.answer("🎯 Выберите цель:", reply_markup=get_goal_keyboard())
     await state.set_state(UserForm.goal)
 
 @router.callback_query(F.data == "edit_level")
 async def cb_edit_level(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("💪 Выберите уровень:", reply_markup=get_workout_level_keyboard())
     await callback.message.delete()
+    await callback.message.answer("💪 Выберите уровень:", reply_markup=get_workout_level_keyboard())
     await state.set_state(UserForm.workout_level)
 
 @router.callback_query(F.data == "edit_days")
 async def cb_edit_days(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("📅 Сколько дней тренироваться?", reply_markup=get_workout_days_keyboard())
     await callback.message.delete()
+    await callback.message.answer("📅 Сколько дней тренироваться?", reply_markup=get_workout_days_keyboard())
     await state.set_state(UserForm.workout_days)
 
 @router.callback_query(F.data == "cancel_edit")
 async def cb_cancel_edit(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.delete()
-    await callback.message.answer("✅ Редактирование завершено.", reply_markup=get_main_menu())
+    await callback.message.answer("✅ Готово.", reply_markup=get_main_menu())
 
-# ========== ОБРАБОТЧИКИ ВВОДА (ЛОГИКА) ==========
-# (Осталась почти такой же, но с возвратом в меню редактирования или главное меню)
-
+# ========== ЛОГИКА ВВОДА ==========
 @router.message(UserForm.age)
 async def process_age(message: Message, state: FSMContext, session: AsyncSession):
-    try:
-        age = int(message.text)
-        if 10 <= age <= 100:
-            await UserCRUD.update_user(session, message.from_user.id, age=age)
-            await message.answer(f"✅ Возраст: {age}", reply_markup=get_main_menu())
-            await state.clear()
-        else:
-            await message.answer("❌ От 10 до 100 лет.")
-    except ValueError:
-        await message.answer("❌ Введите число.")
+    if message.text.isdigit() and 10 <= int(message.text) <= 100:
+        await UserCRUD.update_user(session, message.from_user.id, age=int(message.text))
+        await message.answer(f"✅ Возраст: {message.text}", reply_markup=get_main_menu())
+        await state.clear()
+    else: await message.answer("❌ Введите число (10-100).")
 
 @router.message(UserForm.weight)
 async def process_weight(message: Message, state: FSMContext, session: AsyncSession):
@@ -130,10 +153,8 @@ async def process_weight(message: Message, state: FSMContext, session: AsyncSess
             await UserCRUD.update_user(session, message.from_user.id, weight=val)
             await message.answer(f"✅ Вес: {val} кг", reply_markup=get_main_menu())
             await state.clear()
-        else:
-            await message.answer("❌ От 30 до 250 кг.")
-    except ValueError:
-        await message.answer("❌ Введите число.")
+        else: raise ValueError
+    except: await message.answer("❌ Введите число (30-250).")
 
 @router.message(UserForm.height)
 async def process_height(message: Message, state: FSMContext, session: AsyncSession):
@@ -143,35 +164,28 @@ async def process_height(message: Message, state: FSMContext, session: AsyncSess
             await UserCRUD.update_user(session, message.from_user.id, height=val)
             await message.answer(f"✅ Рост: {val} см", reply_markup=get_main_menu())
             await state.clear()
-        else:
-            await message.answer("❌ От 100 до 250 см.")
-    except ValueError:
-        await message.answer("❌ Введите число.")
+        else: raise ValueError
+    except: await message.answer("❌ Введите число (100-250).")
 
-# --- Обработчики кнопок (Пол, Цель и т.д.) ---
-# Они остаются похожими, но я сократил код для удобства
-
+# Остальные хендлеры (пол, цель...)
 @router.message(UserForm.gender)
 async def process_gender(message: Message, state: FSMContext, session: AsyncSession):
     g_map = {"👨 Мужской": "male", "👩 Женский": "female"}
     if message.text in g_map:
         await UserCRUD.update_user(session, message.from_user.id, gender=g_map[message.text])
-        await message.answer("✅ Пол обновлен", reply_markup=get_main_menu())
+        await message.answer("✅ Пол сохранен", reply_markup=get_main_menu())
         await state.clear()
-    else:
-        await message.answer("Выберите кнопку.")
+    else: await message.answer("Используйте кнопки.")
 
 @router.message(UserForm.activity_level)
 async def process_activity(message: Message, state: FSMContext, session: AsyncSession):
-    # Упрощенная проверка на вхождение части текста
     act_map = {"Сидячий": "sedentary", "Легкая": "light", "Средняя": "medium", "Высокая": "high"}
     found = next((v for k, v in act_map.items() if k in message.text), None)
     if found:
         await UserCRUD.update_user(session, message.from_user.id, activity_level=found)
-        await message.answer("✅ Активность обновлена", reply_markup=get_main_menu())
+        await message.answer("✅ Активность сохранена", reply_markup=get_main_menu())
         await state.clear()
-    else:
-        await message.answer("Выберите кнопку.")
+    else: await message.answer("Используйте кнопки.")
 
 @router.message(UserForm.goal)
 async def process_goal(message: Message, state: FSMContext, session: AsyncSession):
@@ -179,10 +193,9 @@ async def process_goal(message: Message, state: FSMContext, session: AsyncSessio
     found = next((v for k, v in goal_map.items() if k in message.text), None)
     if found:
         await UserCRUD.update_user(session, message.from_user.id, goal=found)
-        await message.answer("✅ Цель обновлена", reply_markup=get_main_menu())
+        await message.answer("✅ Цель сохранена", reply_markup=get_main_menu())
         await state.clear()
-    else:
-        await message.answer("Выберите кнопку.")
+    else: await message.answer("Используйте кнопки.")
 
 @router.message(UserForm.workout_level)
 async def process_level(message: Message, state: FSMContext, session: AsyncSession):
@@ -190,18 +203,15 @@ async def process_level(message: Message, state: FSMContext, session: AsyncSessi
     found = next((v for k, v in l_map.items() if k in message.text), None)
     if found:
         await UserCRUD.update_user(session, message.from_user.id, workout_level=found)
-        await message.answer("✅ Уровень обновлен", reply_markup=get_main_menu())
+        await message.answer("✅ Уровень сохранен", reply_markup=get_main_menu())
         await state.clear()
-    else:
-        await message.answer("Выберите кнопку.")
+    else: await message.answer("Используйте кнопки.")
 
 @router.message(UserForm.workout_days)
 async def process_days(message: Message, state: FSMContext, session: AsyncSession):
-    # Извлекаем число из строки "3 дня" -> 3
     try:
         days = int(''.join(filter(str.isdigit, message.text)))
         await UserCRUD.update_user(session, message.from_user.id, workout_days=days)
         await message.answer(f"✅ Дни: {days}", reply_markup=get_main_menu())
         await state.clear()
-    except:
-        await message.answer("Выберите кнопку.")
+    except: await message.answer("Используйте кнопки.")

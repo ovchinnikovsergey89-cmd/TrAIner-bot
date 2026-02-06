@@ -6,6 +6,57 @@ class UserCRUD:
     
     @staticmethod
     async def get_or_create_user(session: AsyncSession, telegram_id: int, **kwargs):
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        user = result.scalar_one_or_none()
+        
+        if user is None:
+            user = User(telegram_id=telegram_id, **kwargs)
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+        
+        return user
+    
+    @staticmethod
+    async def update_user(session: AsyncSession, telegram_id: int, **kwargs):
+        """Обновляет ТОЛЬКО переданные поля, игнорируя None"""
+        # 🔥 ВАЖНО: Фильтруем None, чтобы не стереть другие данные
+        clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        user = result.scalar_one_or_none()
+        
+        if user:
+            for key, value in clean_kwargs.items():
+                if hasattr(user, key):
+                    setattr(user, key, value)
+            
+            await session.commit()
+            return True
+        return False
+
+    @staticmethod
+    async def get_user(session: AsyncSession, telegram_id: int):
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        return result.scalar_one_or_none()
+    
+    @staticmethod
+    async def get_stats(session: AsyncSession):
+        total = await session.scalar(select(func.count(User.telegram_id)))
+        active = await session.scalar(select(func.count(User.telegram_id)).where(User.weight.isnot(None)))
+        workouts = await session.scalar(select(func.count(User.telegram_id)).where(User.current_workout_program.isnot(None)))
+        nutrition = await session.scalar(select(func.count(User.telegram_id)).where(User.current_nutrition_program.isnot(None)))
+        
+        return {"total": total, "active": active, "workouts": workouts, "nutrition": nutrition}
+    
+    @staticmethod
+    async def get_or_create_user(session: AsyncSession, telegram_id: int, **kwargs):
         """Получить или создать пользователя (Тихий режим)"""
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
