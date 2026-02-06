@@ -53,7 +53,7 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
         # Если нет — запускаем регистрацию
         await start_registration(message, state)
 
-# --- (БЛОК "ИЗМЕНИТЬ ДАННЫЕ" УДАЛЕН) ---
+# --- (ЗДЕСЬ БЫЛ КОД КНОПКИ "ИЗМЕНИТЬ ДАННЫЕ" - ОН УДАЛЕН) ---
 
 # --- 2. ЛОГИКА РЕГИСТРАЦИИ (АНКЕТА) ---
 

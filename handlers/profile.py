@@ -58,7 +58,7 @@ def get_profile_text(user):
         f"🎭 <b>Тренер:</b> {txt_style}"
     )
 
-# --- 1. ПРОСМОТР ПРОФИЛЯ (Только чтение) ---
+# --- 1. ПРОСМОТР ПРОФИЛЯ ---
 @router.message(F.text == "👤 Профиль")
 @router.message(Command("profile"))
 async def show_profile_view(message: Message, session: AsyncSession, state: FSMContext):
@@ -70,18 +70,16 @@ async def show_profile_view(message: Message, session: AsyncSession, state: FSMC
 
     text = get_profile_text(user)
     
-    # Кнопка ведет в режим редактирования
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
     
     await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
-# --- 2. МЕНЮ РЕДАКТИРОВАНИЯ (Сетка кнопок) ---
+# --- 2. МЕНЮ РЕДАКТИРОВАНИЯ ---
 @router.callback_query(F.data == "open_edit_menu")
 async def show_edit_menu(event, session: AsyncSession, state: FSMContext):
     await state.clear()
     
-    # Определяем, кто вызвал функцию (Message или Callback)
     if isinstance(event, Message):
         message = event
         user_id = message.from_user.id
@@ -96,7 +94,6 @@ async def show_edit_menu(event, session: AsyncSession, state: FSMContext):
 
     text = get_profile_text(user) + "\n\n👇 <b>Выберите параметр для изменения:</b>"
 
-    # Сетка кнопок
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text="⚖️ Вес", callback_data="prof_weight"),
@@ -115,7 +112,6 @@ async def show_edit_menu(event, session: AsyncSession, state: FSMContext):
         InlineKeyboardButton(text="👫 Пол", callback_data="prof_gender"),
         InlineKeyboardButton(text="🎭 Тренер", callback_data="prof_style")
     )
-    # Кнопка возврата к просмотру
     kb.row(InlineKeyboardButton(text="✅ Готово (Закрыть)", callback_data="close_edit_menu"))
 
     if is_callback:
@@ -135,7 +131,6 @@ async def close_edit(callback: CallbackQuery, session: AsyncSession):
     await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
 # --- 3. ЛОГИКА ВВОДА ---
-# Помощник: после изменения возвращаем в МЕНЮ РЕДАКТИРОВАНИЯ
 async def return_to_edit(message: Message, session: AsyncSession, state: FSMContext):
     await show_edit_menu(message, session, state)
 
@@ -185,7 +180,7 @@ async def save_age(message: Message, state: FSMContext, session: AsyncSession):
         await return_to_edit(message, session, state)
     else: await message.answer("❌ Введите число (10-100).")
 
-# Кнопки выбора (Цель, Активность...)
+# Кнопки выбора
 @router.callback_query(F.data == "prof_goal")
 async def ask_goal(callback: CallbackQuery):
     await callback.message.delete()
@@ -256,7 +251,7 @@ async def save_gender(message: Message, session: AsyncSession, state: FSMContext
     await message.answer("✅ Пол обновлен.", reply_markup=get_main_menu())
     await return_to_edit(message, session, state)
 
-# Стиль (Inline, возвращает в show_edit_menu)
+# Стиль
 def get_style_keyboard():
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="🔥 Тони", callback_data="set_style_supportive"))
@@ -273,5 +268,4 @@ async def ask_style(callback: CallbackQuery):
 async def save_style(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     style = callback.data.replace("set_style_", "")
     await UserCRUD.update_user(session, callback.from_user.id, trainer_style=style)
-    # Возвращаемся в меню редактирования
     await show_edit_menu(callback, session, state)
