@@ -20,162 +20,202 @@ class GroqService:
             except Exception as e:
                 logging.error(f"Err: {e}")
 
-    # --- ОЧИСТКА МУСОРА ---
+    # --- ОЧИСТКА ОТВЕТА ---
     def _clean_response(self, text: str) -> str:
         if not text: return ""
+        # Удаляем "мысли" (если модель r1) и маркеры кода
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         text = re.sub(r'^```html', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^```markdown', '', text, flags=re.MULTILINE)
         text = re.sub(r'^```', '', text, flags=re.MULTILINE)
         return text.strip()
 
-    # --- БЕЗОПАСНАЯ РАЗБИВКА (FIX CRASH) ---
+    # --- РАЗБИВКА ПО СТРАНИЦАМ ---
     def _smart_split(self, text: str) -> list[str]:
         text = self._clean_response(text)
+        # Разбиваем по разделителю
+        pages = text.split("===PAGE_BREAK===")
         
-        # 1. Режем строго по значку календаря 📅 (неважно, что идет дальше)
-        # (?:^|\n) означает "начало строки"
-        pages = re.split(r'(?:^|\n)(?=📅)', text)
-        
-        # Убираем пустые куски (мусор в начале)
-        pages = [p.strip() for p in pages if len(p.strip()) > 50]
-        
-        # Если разбивка не сработала (например, нет значков), берем весь текст
-        if not pages: pages = [text]
-
-        # 2. АВАРИЙНАЯ ПРОВЕРКА ДЛИНЫ (Telegram Limit = 4096)
-        final_pages = []
+        clean_pages = []
         for p in pages:
-            if len(p) > 4000:
-                # Если страница всё равно огромная, режем её принудительно
-                chunks = [p[i:i+4000] for i in range(0, len(p), 4000)]
-                final_pages.extend(chunks)
-            else:
-                final_pages.append(p)
-                
-        return final_pages
+            # Убираем лишние пробелы в начале/конце страницы, но сохраняем структуру внутри
+            stripped = p.strip()
+            if len(stripped) > 20:
+                clean_pages.append(stripped)
+        
+        if not clean_pages: return [text]
+        return clean_pages
 
-    # --- РАСЧЕТ ДАТ (ПРОФЕССИОНАЛЬНЫЙ) ---
-    def _calculate_dates(self, days_count: int):
+    # --- ГЕНЕРАЦИЯ ДАТ ---
+    def _get_dates_list(self, days_count: int) -> list[str]:
         today = datetime.date.today()
-        schedule = []
+        dates = []
         months = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек']
         weekdays = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс']
         
-        offsets = []
-        if days_count == 1: offsets = [1]
-        elif days_count == 2: offsets = [0, 3] # Пн, Чт
-        elif days_count == 3: offsets = [0, 2, 4] # Пн, Ср, Пт
-        elif days_count == 4: offsets = [0, 1, 3, 4] # Пн, Вт + Чт, Пт
-        elif days_count == 5: offsets = [0, 1, 2, 4, 5]
-        elif days_count == 6: offsets = [0, 1, 2, 3, 4, 5]
-        else: offsets = range(days_count)
-
-        for off in offsets:
-            d = today + timedelta(days=off)
-            d_str = f"{d.day} {months[d.month-1]} ({weekdays[d.weekday()]})"
-            schedule.append(d_str)
-        return schedule
-
-    # --- ОПРЕДЕЛЕНИЕ ТИПА СПЛИТА ---
-    def _get_split_name(self, days: int) -> str:
-        if days <= 2: return "Full Body (Все тело)"
-        if days == 3: return "Full Body или Push/Pull"
-        if days == 4: return "Сплит Верх / Низ"
-        if days == 5: return "Сплит по группам мышц"
-        return "Push / Pull / Legs"
+        current_date = today + timedelta(days=1)
+        step = 1
+        if days_count <= 3: step = 2 
+        
+        for _ in range(days_count):
+            d_str = f"{current_date.day} {months[current_date.month-1]} ({weekdays[current_date.weekday()]})"
+            dates.append(d_str)
+            current_date += timedelta(days=step)
+        return dates
 
     # --- ГЕНЕРАЦИЯ ТРЕНИРОВКИ ---
     async def generate_workout_pages(self, user_data: dict) -> list[str]:
-        if not self.client: return ["❌ Ошибка API"]
+        if not self.client: return ["❌ Ошибка: API ключ не найден"]
         
-        days_count = user_data.get('workout_days', 3)
-        dates_list = self._calculate_dates(days_count)
-        dates_str = "\n".join(dates_list)
-        split_name = self._get_split_name(days_count)
+        level = user_data.get('workout_level', 'Новичок')
+        days = user_data.get('workout_days', 3)
+        goal = user_data.get('goal', 'Форма')
+        gender = user_data.get('gender', '—')
+        age = user_data.get('age', '—')
+        weight = user_data.get('weight', '—')
         
-        # ПРОМПТ: СТРОГИЙ, БЕЗ ЛИШНЕЙ БОЛТОВНИ
-        prompt = f"""
-        Ты профессиональный тренер.
-        Задача: Составить программу на {days_count} дней.
-        Сплит: {split_name}.
-        Клиент: {user_data.get('gender')}, Уровень: {user_data.get('workout_level')}, Цель: {user_data.get('goal')}.
-        
-        ДАТЫ (СТРОГО):
-        {dates_str}
+        dates_list = self._get_dates_list(days)
+        dates_str = ", ".join(dates_list)
 
-        ТРЕБОВАНИЯ:
-        1. Напиши план для КАЖДОЙ даты. Не обрывай ответ.
-        2. Формат заголовка: "📅 День X (Дата) — Название".
-        3. Никаких вступлений. Сразу к делу.
-        4. В конце каждого дня: "🔥 СОВЕТ ПРОФИ".
+        system_prompt = (
+            "Ты — профессиональный тренер. Твоя задача — генерировать сухие, четкие программы. "
+            "Никакой воды. Никаких вступлений. Строгое форматирование."
+        )
 
-        ШАБЛОН ОДНОГО ДНЯ:
+        user_prompt = f"""
+        СОСТАВЬ ПРОГРАММУ (Уровень: {level}, Цель: {goal}, Дней: {days}).
+        Данные клиента: {gender}, {age} лет, {weight} кг.
+        Даты тренировок: {dates_str}
+
+        ТРЕБОВАНИЯ К ФОРМАТУ:
+        1. Раздели дни строкой ===PAGE_BREAK===.
+        2. Всего должно быть {days} блоков тренировок + 1 блок советов в конце.
+        3. Между упражнениями ОБЯЗАТЕЛЬНО делай пустую строку.
+        4. После заголовка даты ОБЯЗАТЕЛЬНО пустая строка.
+
+        ШАБЛОН ОДНОГО ДНЯ (СТРОГО):
+        📅 **[Дата] — [Группа мышц]**
         
-        📅 <b>День 1 (Дата) — Название</b>
-        🤸 Разминка: 5 мин.
+        1. **[Название упражнения]**
+        *[Подходы] x [Повторения] (отдых [сек])*
+        Техника: [Очень краткое описание, 1 предложение]
+
+        2. **[Название упражнения]**
+        *[Подходы] x [Повторения]*
+        Техника: ...
+
+        (и так далее 5-6 упражнений)
         
-        1. <b>Упражнение</b>
-        3 x 12
-        Техника: (Кратко).
+        🧘 **Заминка**: [1 предложение]
+
+        ШАБЛОН БЛОКА СОВЕТОВ (ПОСЛЕДНЯЯ СТРАНИЦА):
+        ===PAGE_BREAK===
+        💡 **Сводка рекомендаций**
         
-        2. <b>Упражнение</b>
-        ...
-        (5-6 упражнений)
-        
-        🧘 Заминка: Растяжка.
-        🔥 СОВЕТ ПРОФИ: (Текст совета).
-        
-        (Обязательно отступ)
+        1. [Совет по питанию - 1 строка]
+        2. [Совет по режиму - 1 строка]
+        3. [Совет по прогрессии - 1 строка]
         """
         
         try:
             r = await self.client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.5
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ], 
+                model=self.model, 
+                temperature=0.3
             )
             return self._smart_split(r.choices[0].message.content)
-        except Exception as e: return [f"Ошибка: {e}"]
+        except Exception as e:
+            logging.error(f"Workout Gen Error: {e}")
+            return ["❌ Ошибка генерации."]
 
     # --- ГЕНЕРАЦИЯ ПИТАНИЯ ---
     async def generate_nutrition_pages(self, user_data: dict) -> list[str]:
         if not self.client: return ["❌ Ошибка API"]
-        kcal = self._calculate_target_calories(user_data)
         
+        kcal = self._calculate_target_calories(user_data)
+        goal = user_data.get('goal', 'Здоровье')
+        
+        # Промпт специально настроен на отсутствие "болтовни"
         prompt = f"""
-        Рацион на {kcal} ккал. Цель: {user_data.get('goal')}.
-        ФОРМАТ:
-        🍳 <b>ЗАВТРАК (3 варианта)</b>
-        ...
-        🍲 <b>ОБЕД (3 варианта)</b>
-        ...
-        🥗 <b>УЖИН (3 варианта)</b>
-        ...
-        🛒 <b>СПИСОК ПРОДУКТОВ</b>
+        Составь конструктор рациона на ~{kcal} ккал (Цель: {goal}).
+        
+        СТРОГИЕ ПРАВИЛА:
+        1. НИКАКИХ вступлений вроде "Вот ваш план". Сразу начинай с Завтрака.
+        2. Для каждого приема пищи дай 3 равноценных варианта.
+        3. Используй разделитель ===PAGE_BREAK=== между приемами пищи.
+        4. Обязательно пустая строка после заголовка.
+
+        ФОРМАТ ВЫВОДА:
+        🍳 **ЗАВТРАК** (~[Ккал] ккал)
+        
+        1. **[Название блюда]**
+        Состав: [Кратко ингредиенты] (КБЖУ: ...)
+        
+        2. **[Название блюда]**
+        Состав: ...
+        
+        3. **[Название блюда]**
+        Состав: ...
+
+        ===PAGE_BREAK===
+        🍲 **ОБЕД** (~[Ккал] ккал)
+        
+        1. ...
+        2. ...
+        3. ...
+
+        ===PAGE_BREAK===
+        🥗 **УЖИН** (~[Ккал] ккал)
+        
+        1. ...
+        2. ...
+        3. ...
+
+        ===PAGE_BREAK===
+        🛒 **СПИСОК ПРОДУКТОВ**
+        
+        - [Категория]: [Продукты]
+        - [Категория]: [Продукты]
+        (Только список, без лишних слов)
         """
+        
         try:
             r = await self.client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.6
+                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.4
             )
-            pages = re.split(r'(?=\n(?:🍳|🍲|🥗|🛒))', self._clean_response(r.choices[0].message.content))
-            # Тоже защищаем от переполнения
-            final_pages = []
-            for p in pages:
-                if len(p) > 50:
-                    if len(p) > 4000:
-                        final_pages.extend([p[i:i+4000] for i in range(0, len(p), 4000)])
-                    else:
-                        final_pages.append(p)
-            return final_pages
+            return self._smart_split(r.choices[0].message.content)
         except Exception as e: return [f"Ошибка: {e}"]
-        
+
     def _calculate_target_calories(self, user_data: dict) -> int:
-        try: return 2000
-        except: return 2000
+        try:
+            weight = float(user_data.get('weight', 70))
+            height = float(user_data.get('height', 170))
+            age = int(user_data.get('age', 30))
+            gender = user_data.get('gender', 'male')
+            
+            if gender == 'male':
+                bmr = 10 * weight + 6.25 * height - 5 * age + 5
+            else:
+                bmr = 10 * weight + 6.25 * height - 5 * age - 161
+            
+            # Средняя активность
+            return int(bmr * 1.375)
+        except:
+            return 2000
 
     async def get_chat_response(self, history: list, user_context: dict) -> str:
-        if not self.client: return "Ошибка"
-        system_msg = {"role": "system", "content": "Ты профессиональный тренер. Отвечай кратко."}
+        if not self.client: return "Ошибка конфигурации API"
+        
+        system_msg = {
+            "role": "system", 
+            "content": "Ты тренер. Отвечай предельно кратко (макс 30 слов). Без воды."
+        }
+        
         try:
-            msgs = [system_msg] + history[-6:]
+            msgs = [system_msg] + history[-5:]
             r = await self.client.chat.completions.create(messages=msgs, model=self.model)
             return self._clean_response(r.choices[0].message.content)
         except: return "Ошибка сети"
