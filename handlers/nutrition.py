@@ -1,10 +1,13 @@
+import json
 import re
-from aiogram import Router, F, types
+from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
+from aiogram.exceptions import TelegramBadRequest
 
 from database.crud import UserCRUD
 from services.groq_service import GroqService
@@ -18,61 +21,62 @@ class RecipeState(StatesGroup):
     waiting_for_dish = State()
 
 def clean_text(text: str) -> str:
-    """Чистильщик текста + улучшатель читаемости"""
+    """Чистильщик текста"""
     if not text: return ""
-    
-    # HTML теги
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
-    
-    # Убираем лишние заголовки, если ИИ их добавил
+    text = re.sub(r'(^|\n)(🍳|🍲|🥗|🛒|🥪)(.*?)(?=\n|$)', r'\1\2<b>\3</b>', text)
     text = text.replace("###", "").replace("Menu:", "")
-    
     return text.strip()
 
-def split_saved_program(full_text: str) -> list[str]:
-    # Регулярка для разделения
-    pattern = r'(?=\n(?:🍳|🍲|🥗|🛒|🍽))'
-    pages = re.split(pattern, full_text)
-    clean_pages = [p.strip() for p in pages if len(p.strip()) > 20]
-    if not clean_pages: return [full_text]
-    return clean_pages
-
 async def show_pages(message: Message, state: FSMContext, pages: list, from_db: bool = False):
+    # 🔥 ГАРАНТИЯ: Если pages - это не список, а строка, превращаем в список
+    if isinstance(pages, str):
+        pages = [pages]
+        
     await state.update_data(nutrition_pages=pages, current_nutrition_page=0)
     await state.set_state(WorkoutPagination.active)
     
-    prefix = "💾 <b>Сохраненное меню:</b>\n\n" if from_db else "✅ <b>Конструктор меню готов:</b>\n\n"
+    prefix = "💾 <b>Твое меню:</b>\n\n" if from_db else "✅ <b>Конструктор готов:</b>\n\n"
     
-    await message.answer(
-        text=prefix + pages[0],
-        # Тут мы передаем total_pages, а клавиатура сама решит, как их показывать
-        reply_markup=get_pagination_kb(0, len(pages), page_type="nutrition"),
-        parse_mode=ParseMode.HTML
-    )
+    try:
+        await message.answer(
+            text=prefix + pages[0],
+            reply_markup=get_pagination_kb(0, len(pages), page_type="nutrition"),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await message.answer(f"{prefix}{str(pages[0])[:3000]}...\n(обрезано)", parse_mode=ParseMode.HTML)
 
-# --- ОБРАБОТЧИКИ (МЕНЮ / ГЕНЕРАЦИЯ) ---
-
-@router.message(F.text == "🍽 Мое питание")
+# --- ПРОСМОТР ---
+@router.message(F.text == "🍽 Мое меню")
 async def show_my_nutrition(message: Message, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, message.from_user.id)
     if not user:
         await message.answer("Сначала заполни профиль! (/start)")
         return
     if user.current_nutrition_program:
-        pages = split_saved_program(user.current_nutrition_program)
-        await show_pages(message, state, pages, from_db=True)
+        try:
+            # Пытаемся загрузить JSON (список страниц)
+            pages = json.loads(user.current_nutrition_program)
+            await show_pages(message, state, pages, from_db=True)
+        except: 
+            # Если там старый формат (просто текст), показываем как одну страницу
+            pages = [user.current_nutrition_program]
+            await show_pages(message, state, pages, from_db=True)
     else:
         await message.answer("🤷‍♂️ Нет меню. Нажми <b>🍏 Питание</b>.", parse_mode=ParseMode.HTML)
 
+# --- ГЕНЕРАЦИЯ ---
 @router.message(F.text == "🍏 Питание")
+@router.message(Command("ai_nutrition"))
 async def request_ai_nutrition(message: Message, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, message.from_user.id)
     if not user: await message.answer("Сначала заполни профиль!"); return
 
     if user.current_nutrition_program:
         confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Создать новое", callback_data="confirm_new_nutrition")],
+            [InlineKeyboardButton(text="✅ Новое меню", callback_data="confirm_new_nutrition")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_nutrition")]
         ])
         await message.answer("У тебя уже есть меню. Создать новое?", reply_markup=confirm_kb)
@@ -91,31 +95,35 @@ async def cancel_generation(callback: CallbackQuery):
     await callback.answer("Отменено")
 
 async def generate_nutrition_process(message: Message, session: AsyncSession, user, state: FSMContext):
-    status_msg = await message.answer("🍏 <b>Составляю меню для вас...</b>", parse_mode=ParseMode.HTML)
+    names = {"tough": "💀 Батя", "scientific": "🧐 Доктор", "supportive": "🔥 Тони"}
+    trainer_name = names.get(user.trainer_style, "AI")
+    
+    status_msg = await message.answer(f"🍏 <b>{trainer_name} собирает конструктор еды...</b>", parse_mode=ParseMode.HTML)
+    
     try:
-        # 🔥 ИСПРАВЛЕНИЕ: Добавлен trainer_style
         user_data = {
-            "goal": user.goal, 
-            "gender": user.gender, 
-            "weight": user.weight, 
-            "age": user.age, 
-            "activity_level": user.activity_level, 
-            "height": user.height,
-            "trainer_style": user.trainer_style # <--- ВОТ ЗДЕСЬ
+            "goal": user.goal, "gender": user.gender, "weight": user.weight, 
+            "age": user.age, "activity_level": user.activity_level, "height": user.height,
+            "trainer_style": user.trainer_style
         }
         
         ai = GroqService()
         raw_pages = await ai.generate_nutrition_pages(user_data)
-        cleaned_pages = [clean_text(p) for p in raw_pages if len(p) > 50]
+        
+        # Чистим каждую страницу
+        cleaned_pages = [clean_text(p) for p in raw_pages if len(p) > 20]
         
         if not cleaned_pages:
-            await status_msg.edit_text("⚠️ Ошибка ИИ.")
+            await status_msg.edit_text("⚠️ Ошибка ИИ (пустой ответ).")
             return
 
-        full_program_text = "\n\n".join(cleaned_pages)
-        await UserCRUD.update_user(session, user.telegram_id, current_nutrition_program=full_program_text)
+        # Сохраняем СПИСОК СТРАНИЦ
+        pages_json = json.dumps(cleaned_pages, ensure_ascii=False)
+        await UserCRUD.update_user(session, user.telegram_id, current_nutrition_program=pages_json)
+        
         await status_msg.delete()
         await show_pages(message, state, cleaned_pages, from_db=False)
+        
     except Exception as e:
         await status_msg.edit_text(f"Ошибка: {e}")
 
@@ -128,7 +136,7 @@ async def change_nutrition_page(callback: CallbackQuery, state: FSMContext):
         pages = data.get("nutrition_pages")
         
         if not pages or target_page < 0 or target_page >= len(pages):
-            await callback.answer("Ошибка страницы")
+            await callback.answer()
             return
             
         await state.update_data(current_nutrition_page=target_page)
@@ -138,26 +146,38 @@ async def change_nutrition_page(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_pagination_kb(target_page, len(pages), page_type="nutrition"),
             parse_mode=ParseMode.HTML
         )
-    except Exception:
-        await callback.answer()
+    except TelegramBadRequest: await callback.answer()
+    except Exception: await callback.answer()
 
 @router.callback_query(F.data == "regen_nutrition")
 async def force_regen_nutrition(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    await callback.message.edit_text("🔄 Пересоздаю...")
+    try: await callback.message.edit_text("🔄 Пересоздаю...")
+    except: await callback.message.answer("🔄 Пересоздаю...")
+    
     user = await UserCRUD.get_user(session, callback.from_user.id)
     await generate_nutrition_process(callback.message, session, user, state)
 
+# --- ПОИСК РЕЦЕПТОВ ---
 @router.callback_query(F.data == "recipe_search")
 async def start_recipe_search(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.answer("👨‍🍳 Введи название блюда:", parse_mode=ParseMode.HTML)
+    await callback.message.answer("👨‍🍳 <b>Введи название блюда:</b>\n(например: <i>Сырники с изюмом</i>)", parse_mode=ParseMode.HTML)
     await state.set_state(RecipeState.waiting_for_dish)
 
 @router.message(RecipeState.waiting_for_dish)
 async def process_recipe_search(message: Message, state: FSMContext):
     if message.text.startswith('/'): return
-    link, title, desc = await search_recipe_video(message.text)
-    if link:
-        await message.answer(f"✅ <b>{title}</b>\n{desc}\n\n👇 <b>Смотреть:</b>\n{link}", parse_mode=ParseMode.HTML)
-    else:
-        await message.answer("Не нашел рецепт :(")
+    
+    loading = await message.answer("🔎 Ищу рецепт...")
+    try:
+        link, title, desc = await search_recipe_video(message.text)
+        await loading.delete()
+        
+        if link:
+            await message.answer(f"✅ <b>{title}</b>\n{desc}\n\n👇 <b>Смотреть:</b>\n{link}", parse_mode=ParseMode.HTML)
+        else:
+            await message.answer("Не нашел рецепт :(")
+    except Exception as e:
+         await loading.edit_text("Ошибка поиска.")
+    
+    await state.clear()

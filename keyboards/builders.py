@@ -78,6 +78,13 @@ def get_workout_days_keyboard() -> ReplyKeyboardMarkup:
     builder.adjust(3)
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
+def get_trainer_style_keyboard() -> ReplyKeyboardMarkup:
+    builder = ReplyKeyboardBuilder()
+    builder.row(KeyboardButton(text="🔥 Тони (Мотиватор)"))
+    builder.row(KeyboardButton(text="💀 Батя (Жесткий)"))
+    builder.row(KeyboardButton(text="🧐 Доктор (Научный)"))
+    return builder.as_markup(resize_keyboard=True)
+
 def get_profile_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     builder.row(KeyboardButton(text="🔄 Изменить данные"))

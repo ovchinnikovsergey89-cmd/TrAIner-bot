@@ -7,7 +7,7 @@ from config import Config
 
 class GroqService:
     def __init__(self):
-        self.api_key = Config.DEEPSEEK_API_KEY 
+        self.api_key = Config.DEEPSEEK_API_KEY
         self.client = None
         self.model = "deepseek-chat"
         
@@ -30,7 +30,6 @@ class GroqService:
             act = user_data.get('activity_level', 'medium')
             goal = user_data.get('goal', 'maintenance')
             
-            # BMR Mifflin-St Jeor
             if 'Муж' in str(g) or 'male' in str(g): bmr = 10*w + 6.25*h - 5*a + 5
             else: bmr = 10*w + 6.25*h - 5*a - 161
             
@@ -47,14 +46,38 @@ class GroqService:
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         text = re.sub(r'^```html', '', text, flags=re.MULTILINE)
         text = re.sub(r'^```', '', text, flags=re.MULTILINE)
+        
+        match = re.search(r'(📅)', text)
+        if match: text = text[match.start():]
+            
         return text.strip()
 
     def _smart_split(self, text: str) -> list[str]:
         text = self._clean_response(text)
-        # Разбиваем по дням (смайлик календаря)
-        pages = re.split(r'(?=\n(?:📅))', text)
-        if len(pages) < 2: pages = re.split(r'(?=📅)', text)
-        return [p.strip() for p in pages if len(p.strip()) > 20] or [text]
+        
+        # Бьем по разделам
+        pages = re.split(r'(?=\n(?:🍳|🍲|🥗|🥪|🛒))', text)
+        
+        # Фильтруем
+        pages = [p.strip() for p in pages if len(p.strip()) > 20]
+        
+        # Страховка если разбивка не сработала
+        if len(pages) < 2:
+            if len(text) > 3000:
+                pages = [text[i:i+3000] for i in range(0, len(text), 3000)]
+            else:
+                pages = [text]
+
+        # Финальная проверка длины
+        final_pages = []
+        for p in pages:
+            if len(p) > 3800:
+                chunks = [p[i:i+3800] for i in range(0, len(p), 3800)]
+                final_pages.extend(chunks)
+            else:
+                final_pages.append(p)
+                
+        return final_pages
 
     def _calculate_dates(self, days_per_week: int):
         today = datetime.date.today()
@@ -67,117 +90,126 @@ class GroqService:
             schedule.append(f"{d.day} {months[d.month-1]} ({weekdays[d.weekday()]})")
         return schedule
 
-    # --- 🔥 ЛИЧНОСТИ ТРЕНЕРОВ (ОБНОВЛЕНО) 🔥 ---
+    # --- ЛИЧНОСТИ ТРЕНЕРА ---
     def _get_persona_prompt(self, style: str) -> str:
-        print(f"DEBUG: Генерация в стиле '{style}'")
-        
-        if style == "tough": # Батя
-            emojis = "👊 💀 🦍 🗿 💢 🔨 🩸🔩💥☠️"
+        if style == "tough":
             return (
-                f"Ты — 'Батя'. ЖЕСТКИЙ тренер старой школы. "
-                f"Твои фирменные смайлы: {emojis}. Вставляй их часто! "
-                "Ты не терпишь нытья. Говори коротко, грубо и по делу. "
-                "Используй сленг качалки."
+                "Ты — 'Батя'. Суровый тренер. "
+                "Твой стиль: Еда — это топливо. "
+                "Смайлы: 👊, 💀, 🦍, 🗿, 💢, 🔨, 🩸. Запрещены: 🔥, 🚀, ❤️. "
+                "Пиши коротко, жестко."
             )
-        elif style == "scientific": # Доктор
-            emojis = "🧠 🧬 📈 🧪 🩺 ⚖️ 🔬💡📊"
+        elif style == "scientific":
             return (
-                f"Ты — 'Доктор Наук'. Интеллектуальный тренер-биохакер. "
-                f"Твои фирменные смайлы: {emojis}. Вставляй их часто! "
-                "Ты опираешься на факты и биомеханику. Тон вежливый, но занудный."
+                "Ты — 'Доктор'. Биохакер. "
+                "Твой стиль: Еда — это химия. Макронутриенты. "
+                "Смайлы: 🧠, 🧬, 📈, 🧪, 🩺, ⚖️."
             )
-        else: # supportive (Тони)
-            emojis = "🔥 🚀 💪 🏆 🎯 💯😎⚡🔝🥇"
+        else: # supportive
             return (
-                f"Ты — 'Тони', лучший друг и мотиватор. "
-                f"Твои фирменные смайлы: {emojis}. Вставляй их часто! "
-                "Ты максимально позитивный и энергичный."
+                "Ты — 'Тони'. Друг и мотиватор. "
+                "Твой стиль: Еда — это энергия! "
+                "Смайлы: 🔥, 🚀, 💪, 🏆, 🎯, 💯."
             )
 
-    # --- ГЕНЕРАЦИЯ ПИТАНИЯ ---
+    # --- 🔥 ГЕНЕРАЦИЯ ПИТАНИЯ (ОБНОВЛЕН СПИСОК ПОКУПОК) 🔥 ---
     async def generate_nutrition_pages(self, user_data: dict) -> list[str]:
         if not self.client: return ["❌ Ошибка API"]
         
-        style = user_data.get("trainer_style") or "supportive"
+        style = user_data.get("trainer_style", "supportive")
         persona = self._get_persona_prompt(style)
         kcal = self._calculate_target_calories(user_data)
         
         prompt = f"""
         {persona}
-        ЗАДАЧА: Составь меню на день.
-        Клиент: {user_data.get('weight')}кг, цель: {user_data.get('goal')}. Калории: {kcal}.
+        ЗАДАЧА: Создай КОНСТРУКТОР ПИТАНИЯ на день (Ккал: {kcal}).
+        Клиент: {user_data.get('weight')}кг, цель: {user_data.get('goal')}.
+        
+        ТЫ ОБЯЗАН:
+        1. ВСТУПЛЕНИЕ ЗАПРЕЩЕНО.
+        2. Предложить ПО 3 ВАРИАНТА на каждый прием.
+        3. Выделяй названия блюд жирным.
+        4. Пиши КБЖУ в скобках.
         
         ФОРМАТ ОТВЕТА (СТРОГО):
-        🍳 <b>ЗАВТРАКИ</b> (текст...)
-        🍲 <b>ОБЕДЫ</b> (текст...)
-        🥗 <b>УЖИНЫ</b> (текст...)
-        🛒 <b>СПИСОК ПОКУПОК</b> (текст...)
+        🍳 <b>ЗАВТРАКИ</b>
+        1. <b>Блюдо</b> (КБЖУ)
+        — Коммент
+        
+        2. <b>Блюдо</b> (КБЖУ)
+        — Коммент
+        
+        3. <b>Блюдо</b> (КБЖУ)
+        — Коммент
+        
+        🍲 <b>ОБЕДЫ</b>
+        (3 варианта)
+        
+        🥗 <b>УЖИНЫ</b>
+        (3 варианта)
+        
+        🥪 <b>ПЕРЕКУСЫ</b>
+        (3 варианта)
+        
+        🛒 <b>СПИСОК ПОКУПОК (СТРОГО ПО КАТЕГОРИЯМ!)</b>
+        🥩 <b>Белки (Мясо/Рыба/Яйца):</b>
+        — ...
+        — ...
+        
+        🥦 <b>Овощи и Фрукты:</b>
+        — ...
+        
+        🌾 <b>Крупы и Хлеб:</b>
+        — ...
+        
+        🥛 <b>Молочка и Прочее:</b>
+        — ...
         """
         try:
             r = await self.client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}], model=self.model
+                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.7
             )
-            text = self._clean_response(r.choices[0].message.content)
-            pages = re.split(r'(?=\n(?:🍳|🍲|🥗|🛒))', text)
-            if len(pages) < 2: pages = [text]
-            return [p.strip() for p in pages if len(p.strip()) > 20]
+            return self._smart_split(r.choices[0].message.content)
         except Exception as e: return [f"Ошибка: {e}"]
 
-    # --- ГЕНЕРАЦИЯ ТРЕНИРОВКИ (ИСПРАВЛЕНЫ ЖИРНЫЙ ШРИФТ И СОВЕТЫ) ---
+    # --- ГЕНЕРАЦИЯ ТРЕНИРОВКИ ---
     async def generate_workout_pages(self, user_data: dict) -> list[str]:
         if not self.client: return ["❌ Ошибка API"]
         
-        style = user_data.get("trainer_style") or "supportive"
+        style = user_data.get("trainer_style", "supportive")
         persona = self._get_persona_prompt(style)
         days = user_data.get('workout_days', 3)
         dates = ", ".join(self._calculate_dates(days))
         
         prompt = f"""
         {persona}
-        ЗАДАЧА: Напиши программу тренировок на неделю ({days} дн).
-        Клиент: {user_data.get('gender')}, {user_data.get('workout_level')}. Цель: {user_data.get('goal')}.
+        ЗАДАЧА: Программа на {days} дн.
+        Клиент: {user_data.get('gender')}, {user_data.get('workout_level')}.
         Даты: {dates}.
         
-        ФОРМАТ СТРОГО:
-        1. Каждый день начинай с заголовка: 📅 ДАТА (День недели).
-        2. НАЗВАНИЯ УПРАЖНЕНИЙ выделяй жирным шрифтом (оборачивай в **звездочки**). Пример: **Жим лежа**
-        3. Рядом с каждым названием ставь свой фирменный смайл.
-        4. Каждое упражнение пиши с новой строки.
-        5. МЕЖДУ УПРАЖНЕНИЯМИ ОБЯЗАТЕЛЬНО ДЕЛАЙ ПУСТУЮ СТРОКУ! (Double line break).
-        6. НЕ ПИШИ "Советы" или "Итоги" в конце дня. Только упражнения.
-        
-        Пример:
-        📅 10 фев (Пн)
-        
-        **Жим лежа** (смайл): 3x12
-        (описание)
-        
-        **Приседания** (смайл): 4x10
-        (описание)
+        ПРАВИЛА:
+        1. Без вступления.
+        2. Дни начинай с 📅.
+        3. Упражнения <b>жирным</b>.
+        4. Между упражнениями пустая строка.
+        5. Советы в конце с 💡.
         """
         try:
             r = await self.client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}], model=self.model
+                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.7
             )
             return self._smart_split(r.choices[0].message.content)
         except Exception as e: return [f"Ошибка: {e}"]
 
-    # --- ЧАТ И АНАЛИЗ ---
-    async def analyze_progress(self, user_data: dict, current_weight: float) -> str:
-        if not self.client: return "Err"
-        style = user_data.get("trainer_style") or "supportive"
-        persona = self._get_persona_prompt(style)
-        prompt = f"{persona}\nКлиент весил {user_data.get('weight')}кг, стал {current_weight}кг. Цель: {user_data.get('goal')}. Дай комментарий (макс 3 предл)."
-        try:
-            r = await self.client.chat.completions.create(messages=[{"role": "user", "content": prompt}], model=self.model)
-            return self._clean_response(r.choices[0].message.content)
-        except: return "Ошибка анализа"
-
+    # --- ЧАТ ---
     async def get_chat_response(self, history: list, user_context: dict) -> str:
         if not self.client: return "Err"
-        style = user_context.get("trainer_style") or "supportive"
+        style = user_context.get("trainer_style", "supportive")
         persona = self._get_persona_prompt(style)
-        system_msg = {"role": "system", "content": f"{persona}\nТВОЙ КЛИЕНТ: {user_context.get('name')}, {user_context.get('weight')}кг. Отвечай кратко."}
+        system_msg = {
+            "role": "system", 
+            "content": f"{persona}\nКлиент: {user_context.get('name')}. Отвечай кратко."
+        }
         try:
             msgs = [system_msg] + history[-6:]
             r = await self.client.chat.completions.create(messages=msgs, model=self.model)
