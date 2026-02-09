@@ -23,49 +23,51 @@ class GroqService:
     # --- ОЧИСТКА МУСОРА ---
     def _clean_response(self, text: str) -> str:
         if not text: return ""
-        # Удаляем "мысли" нейросети
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         text = re.sub(r'^```html', '', text, flags=re.MULTILINE)
         text = re.sub(r'^```', '', text, flags=re.MULTILINE)
         return text.strip()
 
-    # --- ЖЕСТКАЯ РАЗБИВКА ПО ДНЯМ ---
+    # --- БЕЗОПАСНАЯ РАЗБИВКА (FIX CRASH) ---
     def _smart_split(self, text: str) -> list[str]:
         text = self._clean_response(text)
         
-        # Мы режем текст СТРОГО перед символом 📅
-        # (?:^|\n) означает "начало текста или новая строка"
+        # 1. Режем строго по значку календаря 📅 (неважно, что идет дальше)
+        # (?:^|\n) означает "начало строки"
         pages = re.split(r'(?:^|\n)(?=📅)', text)
         
-        # Выкидываем пустые куски (мусор в начале)
+        # Убираем пустые куски (мусор в начале)
         pages = [p.strip() for p in pages if len(p.strip()) > 50]
         
-        # Если вдруг ИИ не поставил 📅, возвращаем как есть (чтоб хоть что-то было)
+        # Если разбивка не сработала (например, нет значков), берем весь текст
         if not pages: pages = [text]
 
-        return pages
+        # 2. АВАРИЙНАЯ ПРОВЕРКА ДЛИНЫ (Telegram Limit = 4096)
+        final_pages = []
+        for p in pages:
+            if len(p) > 4000:
+                # Если страница всё равно огромная, режем её принудительно
+                chunks = [p[i:i+4000] for i in range(0, len(p), 4000)]
+                final_pages.extend(chunks)
+            else:
+                final_pages.append(p)
+                
+        return final_pages
 
-    # --- ПРОФЕССИОНАЛЬНЫЕ ДАТЫ (СПЛИТЫ) ---
+    # --- РАСЧЕТ ДАТ (ПРОФЕССИОНАЛЬНЫЙ) ---
     def _calculate_dates(self, days_count: int):
         today = datetime.date.today()
         schedule = []
         months = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек']
         weekdays = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс']
         
-        # Логика:
-        # 1 день: Завтра
-        # 2 дня: Пн, Чт (Фуллбоди)
-        # 3 дня: Пн, Ср, Пт (Классика)
-        # 4 дня: Пн, Вт + Чт, Пт (Верх/Низ) - ПРОФИ ВАРИАНТ
-        # 5 дней: Пн-Пт
-        # 6 дней: Пн-Сб
-        
         offsets = []
         if days_count == 1: offsets = [1]
-        elif days_count == 2: offsets = [0, 3]
-        elif days_count == 3: offsets = [0, 2, 4]
-        elif days_count == 4: offsets = [0, 1, 3, 4] # <-- Вот ваш сплит
+        elif days_count == 2: offsets = [0, 3] # Пн, Чт
+        elif days_count == 3: offsets = [0, 2, 4] # Пн, Ср, Пт
+        elif days_count == 4: offsets = [0, 1, 3, 4] # Пн, Вт + Чт, Пт
         elif days_count == 5: offsets = [0, 1, 2, 4, 5]
+        elif days_count == 6: offsets = [0, 1, 2, 3, 4, 5]
         else: offsets = range(days_count)
 
         for off in offsets:
@@ -74,11 +76,13 @@ class GroqService:
             schedule.append(d_str)
         return schedule
 
-    # --- СТИЛЬ ТРЕНЕРА ---
-    def _get_persona_prompt(self, style: str) -> str:
-        if style == "tough": return "Ты 'Батя'. Жесткий, грубый. Смайл: 👊. Твой совет - это приказ."
-        elif style == "scientific": return "Ты 'Доктор'. Умный, душный. Смайл: 🧬. Твой совет - это наука."
-        else: return "Ты 'Тони'. Веселый братан. Смайл: 🔥. Твой совет - мотивация."
+    # --- ОПРЕДЕЛЕНИЕ ТИПА СПЛИТА ---
+    def _get_split_name(self, days: int) -> str:
+        if days <= 2: return "Full Body (Все тело)"
+        if days == 3: return "Full Body или Push/Pull"
+        if days == 4: return "Сплит Верх / Низ"
+        if days == 5: return "Сплит по группам мышц"
+        return "Push / Pull / Legs"
 
     # --- ГЕНЕРАЦИЯ ТРЕНИРОВКИ ---
     async def generate_workout_pages(self, user_data: dict) -> list[str]:
@@ -87,41 +91,41 @@ class GroqService:
         days_count = user_data.get('workout_days', 3)
         dates_list = self._calculate_dates(days_count)
         dates_str = "\n".join(dates_list)
-        style = user_data.get("trainer_style", "supportive")
-        persona = self._get_persona_prompt(style)
+        split_name = self._get_split_name(days_count)
         
-        # ПРОМПТ НАСТРОЕН НА ТОЧНОСТЬ
+        # ПРОМПТ: СТРОГИЙ, БЕЗ ЛИШНЕЙ БОЛТОВНИ
         prompt = f"""
-        Роль: Тренер. {persona}
-        Задача: Программа на {days_count} дней.
-        Даты:
-        {dates_str}
+        Ты профессиональный тренер.
+        Задача: Составить программу на {days_count} дней.
+        Сплит: {split_name}.
+        Клиент: {user_data.get('gender')}, Уровень: {user_data.get('workout_level')}, Цель: {user_data.get('goal')}.
         
-        Клиент: {user_data.get('gender')}, {user_data.get('workout_level')}, Цель: {user_data.get('goal')}.
+        ДАТЫ (СТРОГО):
+        {dates_str}
 
-        ТРЕБОВАНИЯ К ФОРМАТУ (СТРОГО СОБЛЮДАЙ!):
-        1. Напиши план для КАЖДОЙ даты из списка. Не пропускай дни!
-        2. Жирным выделяй ТОЛЬКО название упражнения (пример: <b>Жим лежа</b>).
-        3. Технику пиши обычным текстом.
-        4. В конце каждого дня пиши "🗣 СОВЕТ ТРЕНЕРА".
+        ТРЕБОВАНИЯ:
+        1. Напиши план для КАЖДОЙ даты. Не обрывай ответ.
+        2. Формат заголовка: "📅 День X (Дата) — Название".
+        3. Никаких вступлений. Сразу к делу.
+        4. В конце каждого дня: "🔥 СОВЕТ ПРОФИ".
 
         ШАБЛОН ОДНОГО ДНЯ:
         
-        📅 <b>День 1 (Дата) — Название тренировки</b>
+        📅 <b>День 1 (Дата) — Название</b>
         🤸 Разминка: 5 мин.
         
-        1. <b>Название упражнения</b>
-        3 подхода x 12 повторений
-        Техника: Спина прямая, локти в стороны.
+        1. <b>Упражнение</b>
+        3 x 12
+        Техника: (Кратко).
         
-        2. <b>Название упражнения</b>
+        2. <b>Упражнение</b>
         ...
-        (минимум 5 упражнений)
+        (5-6 упражнений)
         
         🧘 Заминка: Растяжка.
-        🗣 СОВЕТ ТРЕНЕРА: (Твой уникальный комментарий в стиле {style})
+        🔥 СОВЕТ ПРОФИ: (Текст совета).
         
-        (Обязательно отступ перед следующим днем)
+        (Обязательно отступ)
         """
         
         try:
@@ -131,53 +135,45 @@ class GroqService:
             return self._smart_split(r.choices[0].message.content)
         except Exception as e: return [f"Ошибка: {e}"]
 
-    # --- КНОПКА "СОВЕТ ТРЕНЕРА" ---
-    async def get_trainer_advice(self, user_context: dict) -> str:
-        if not self.client: return "Ошибка..."
-        style = user_context.get("trainer_style", "supportive")
-        prompt = f"""
-        {self._get_persona_prompt(style)}
-        Дай ОДИН короткий, жесткий совет по тренировкам или питанию.
-        Максимум 20 слов.
-        """
-        try:
-            r = await self.client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.8
-            )
-            return self._clean_response(r.choices[0].message.content)
-        except: return "Ошибка сети."
-
-    # --- ПИТАНИЕ ---
+    # --- ГЕНЕРАЦИЯ ПИТАНИЯ ---
     async def generate_nutrition_pages(self, user_data: dict) -> list[str]:
         if not self.client: return ["❌ Ошибка API"]
         kcal = self._calculate_target_calories(user_data)
-        style = user_data.get("trainer_style", "supportive")
+        
         prompt = f"""
-        {self._get_persona_prompt(style)}
-        Рацион на {kcal} ккал.
+        Рацион на {kcal} ккал. Цель: {user_data.get('goal')}.
         ФОРМАТ:
-        🍳 ЗАВТРАК (3 варианта)
-        🍲 ОБЕД (3 варианта)
-        🥗 УЖИН (3 варианта)
-        🛒 СПИСОК ПРОДУКТОВ
+        🍳 <b>ЗАВТРАК (3 варианта)</b>
+        ...
+        🍲 <b>ОБЕД (3 варианта)</b>
+        ...
+        🥗 <b>УЖИН (3 варианта)</b>
+        ...
+        🛒 <b>СПИСОК ПРОДУКТОВ</b>
         """
         try:
             r = await self.client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.7
+                messages=[{"role": "user", "content": prompt}], model=self.model, temperature=0.6
             )
-            # Разбиваем питание по иконкам еды
             pages = re.split(r'(?=\n(?:🍳|🍲|🥗|🛒))', self._clean_response(r.choices[0].message.content))
-            return [p.strip() for p in pages if len(p.strip()) > 20]
+            # Тоже защищаем от переполнения
+            final_pages = []
+            for p in pages:
+                if len(p) > 50:
+                    if len(p) > 4000:
+                        final_pages.extend([p[i:i+4000] for i in range(0, len(p), 4000)])
+                    else:
+                        final_pages.append(p)
+            return final_pages
         except Exception as e: return [f"Ошибка: {e}"]
         
     def _calculate_target_calories(self, user_data: dict) -> int:
-        try: return 2000 # Упрощенная заглушка
+        try: return 2000
         except: return 2000
 
     async def get_chat_response(self, history: list, user_context: dict) -> str:
-        if not self.client: return "Err"
-        style = user_context.get("trainer_style", "supportive")
-        system_msg = {"role": "system", "content": f"Ты тренер. {self._get_persona_prompt(style)}"}
+        if not self.client: return "Ошибка"
+        system_msg = {"role": "system", "content": "Ты профессиональный тренер. Отвечай кратко."}
         try:
             msgs = [system_msg] + history[-6:]
             r = await self.client.chat.completions.create(messages=msgs, model=self.model)
