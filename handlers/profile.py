@@ -28,7 +28,8 @@ ACTIVITY_MAP = {
     "sedentary": "🪑 Сидячий", "light": "🚶 Малая", 
     "moderate": "🏃 Средняя", "high": "🏋️ Высокая", "extreme": "🔥 Экстремальная"
 }
-STYLE_MAP = {"supportive": "🔥 Тони (Мотиватор)", "tough": "💀 Сержант", "scientific": "🧐 Доктор"}
+# 🔥 ОБНОВЛЕННЫЕ ИМЕНА ТРЕНЕРОВ
+STYLE_MAP = {"supportive": "🔥 Тони (Мотиватор)", "tough": "💀 Батя (Жесткий)", "scientific": "🧐 Доктор (Научный)"}
 
 # --- ФУНКЦИЯ ГЕНЕРАЦИИ ТЕКСТА ---
 def get_profile_text(user):
@@ -251,12 +252,12 @@ async def save_gender(message: Message, session: AsyncSession, state: FSMContext
     await message.answer("✅ Пол обновлен.", reply_markup=get_main_menu())
     await return_to_edit(message, session, state)
 
-# Стиль
+# 🔥 ВШИТАЯ КЛАВИАТУРА ВЫБОРА СТИЛЯ
 def get_style_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🔥 Тони", callback_data="set_style_supportive"))
-    builder.row(InlineKeyboardButton(text="💀 Сержант", callback_data="set_style_tough"))
-    builder.row(InlineKeyboardButton(text="🧐 Доктор", callback_data="set_style_scientific"))
+    builder.row(InlineKeyboardButton(text="🔥 Тони (Мотиватор)", callback_data="set_style_supportive"))
+    builder.row(InlineKeyboardButton(text="💀 Батя (Жесткий)", callback_data="set_style_tough"))
+    builder.row(InlineKeyboardButton(text="🧐 Доктор (Научный)", callback_data="set_style_scientific"))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="open_edit_menu"))
     return builder.as_markup()
 
@@ -268,4 +269,5 @@ async def ask_style(callback: CallbackQuery):
 async def save_style(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     style = callback.data.replace("set_style_", "")
     await UserCRUD.update_user(session, callback.from_user.id, trainer_style=style)
+    # Возвращаемся в меню редактирования
     await show_edit_menu(callback, session, state)

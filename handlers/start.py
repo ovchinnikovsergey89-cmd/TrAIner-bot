@@ -12,15 +12,16 @@ from sqlalchemy import select
 from states.user_states import UserForm
 from database.models import User
 
-# Импортируем клавиатуры
+# Импортируем клавиатуры для анкеты
 from keyboards.builders import (
     get_gender_keyboard,
     get_activity_keyboard,
     get_goal_keyboard,
     get_workout_level_keyboard,
-    get_workout_days_keyboard,
-    get_main_menu
+    get_workout_days_keyboard
 )
+# 🔥 Импортируем меню НАПРЯМУЮ, чтобы точно применились изменения
+from keyboards.main_menu import get_main_menu
 
 router = Router()
 
@@ -52,8 +53,6 @@ async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
     else:
         # Если нет — запускаем регистрацию
         await start_registration(message, state)
-
-# --- (ЗДЕСЬ БЫЛ КОД КНОПКИ "ИЗМЕНИТЬ ДАННЫЕ" - ОН УДАЛЕН) ---
 
 # --- 2. ЛОГИКА РЕГИСТРАЦИИ (АНКЕТА) ---
 
@@ -100,7 +99,7 @@ async def process_weight(message: Message, state: FSMContext):
     try:
         text = message.text.replace(',', '.')
         weight = float(text)
-        if not (30 <= weight <= 250): raise ValueError
+        if not (30 <= weight <= 250): raise ValueError # Чуть расширил диапазон
         
         await state.update_data(weight=weight)
         await message.answer("Ваш рост (в см)?")
@@ -111,13 +110,12 @@ async def process_weight(message: Message, state: FSMContext):
 @router.message(UserForm.height)
 async def process_height(message: Message, state: FSMContext):
     try:
-        # Добавил защиту от float ввода роста
-        height = float(message.text.replace(',', '.'))
-        if not (100 <= height <= 250):
+        val = float(message.text.replace(',', '.'))
+        if not (100 <= val <= 250):
             await message.answer("Введите реальный рост (в см).")
             return
-        
-        await state.update_data(height=height)
+            
+        await state.update_data(height=val)
         await message.answer("Какой у вас уровень активности?", reply_markup=get_activity_keyboard())
         await state.set_state(UserForm.activity_level)
     except ValueError:
@@ -194,7 +192,6 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
     if days > 7: days = 7
     
     data = await state.get_data()
-    data['workout_days'] = days
     telegram_id = message.from_user.id
     first_name = message.from_user.first_name
     
@@ -215,7 +212,7 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
     user.activity_level = data.get('activity_level')
     user.goal = data.get('goal')
     user.workout_level = data.get('workout_level')
-    user.workout_days = data.get('workout_days')
+    user.workout_days = days # Записываем вычисленные дни
     
     await session.commit()
     
@@ -225,7 +222,7 @@ async def process_workout_days(message: Message, state: FSMContext, session: Asy
         f"✅ <b>Профиль успешно создан!</b>\n\n"
         f"👤 Имя: {safe_name}\n"
         f"📊 Вес: {data.get('weight')} кг\n"
-        f"🎯 Цель: {data.get('goal')} (дней: {days})\n\n"
+        f"🎯 Цель: {data.get('goal')} ({days} дн/нед)\n\n"
         f"Теперь вам доступны все функции бота! 👇"
     )
     await message.answer(summary, reply_markup=get_main_menu(), parse_mode=ParseMode.HTML)

@@ -1,31 +1,24 @@
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import BigInteger, String, Float, Integer
-
-class Base(DeclarativeBase):
-    pass
+from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func
+from database.database import Base # Импортируем Base, который мы создали выше
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = 'users'
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    telegram_id = Column(BigInteger, primary_key=True)
+    name = Column(String, nullable=True)
+    age = Column(Integer, nullable=True)
+    weight = Column(Float, nullable=True)
+    height = Column(Float, nullable=True)
+    gender = Column(String, nullable=True)
+    activity_level = Column(String, nullable=True)
+    goal = Column(String, nullable=True)
+    workout_level = Column(String, nullable=True)
+    workout_days = Column(Integer, default=3)
     
-    # Анкета
-    name: Mapped[str] = mapped_column(String, nullable=True)
-    age: Mapped[int] = mapped_column(Integer, nullable=True)
-    weight: Mapped[float] = mapped_column(Float, nullable=True)
-    height: Mapped[float] = mapped_column(Float, nullable=True)
-    gender: Mapped[str] = mapped_column(String, nullable=True)
-    activity_level: Mapped[str] = mapped_column(String, nullable=True)
-    goal: Mapped[str] = mapped_column(String, nullable=True)
+    current_workout_program = Column(String, nullable=True)
+    current_nutrition_program = Column(String, nullable=True)
     
-    # Настройки тренировок
-    workout_level: Mapped[str] = mapped_column(String, nullable=True)
-    workout_days: Mapped[int] = mapped_column(Integer, nullable=True)
+    trainer_style = Column(String, default="supportive")
     
-    # Программы (JSON строки)
-    current_workout_program: Mapped[str] = mapped_column(String, nullable=True)
-    current_nutrition_program: Mapped[str] = mapped_column(String, nullable=True)
-    
-    # 🔥 НОВОЕ ПОЛЕ: Стиль общения тренера (по умолчанию "supportive")
-    trainer_style: Mapped[str] = mapped_column(String, default="supportive", nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())

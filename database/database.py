@@ -1,15 +1,25 @@
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from database.models import Base, User
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base
 from config import Config
 
-# --- ИСПРАВЛЕНИЕ: echo=False отключает вывод SQL-запросов в консоль ---
+# 1. Сначала объявляем Base
+Base = declarative_base()
+
+# 2. Создаем движок
+# 🔥 ИСПРАВЛЕНИЕ: echo=False отключает "хлам" в консоли
 engine = create_async_engine(Config.DATABASE_URL, echo=False)
 
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+# 3. Создаем фабрику сессий
+AsyncSessionLocal = sessionmaker(
+    engine, 
+    class_=AsyncSession, 
+    expire_on_commit=False
+)
 
+# 4. Функция создания таблиц
 async def init_db():
-    """
-    Создает таблицы в базе данных, если их нет.
-    """
     async with engine.begin() as conn:
+        # Импортируем модели внутри функции (чтобы избежать кругового импорта)
+        import database.models
+        # Создаем таблицы
         await conn.run_sync(Base.metadata.create_all)
