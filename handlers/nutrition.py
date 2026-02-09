@@ -51,8 +51,7 @@ async def show_pages(message: Message, state: FSMContext, pages: list, from_db: 
         parse_mode=ParseMode.HTML
     )
 
-# --- ОБРАБОТЧИКИ (МЕНЮ / ГЕНЕРАЦИЯ) - ОСТАЮТСЯ ПРЕЖНИМИ ---
-# (Ниже код стандартный, как был в прошлом ответе, копирую для целостности файла)
+# --- ОБРАБОТЧИКИ (МЕНЮ / ГЕНЕРАЦИЯ) ---
 
 @router.message(F.text == "🍽 Мое питание")
 async def show_my_nutrition(message: Message, session: AsyncSession, state: FSMContext):
@@ -94,7 +93,17 @@ async def cancel_generation(callback: CallbackQuery):
 async def generate_nutrition_process(message: Message, session: AsyncSession, user, state: FSMContext):
     status_msg = await message.answer("🍏 <b>Составляю меню для вас...</b>", parse_mode=ParseMode.HTML)
     try:
-        user_data = {"goal": user.goal, "gender": user.gender, "weight": user.weight, "age": user.age, "activity_level": user.activity_level, "height": user.height}
+        # 🔥 ИСПРАВЛЕНИЕ: Добавлен trainer_style
+        user_data = {
+            "goal": user.goal, 
+            "gender": user.gender, 
+            "weight": user.weight, 
+            "age": user.age, 
+            "activity_level": user.activity_level, 
+            "height": user.height,
+            "trainer_style": user.trainer_style # <--- ВОТ ЗДЕСЬ
+        }
+        
         ai = GroqService()
         raw_pages = await ai.generate_nutrition_pages(user_data)
         cleaned_pages = [clean_text(p) for p in raw_pages if len(p) > 50]
@@ -124,7 +133,6 @@ async def change_nutrition_page(callback: CallbackQuery, state: FSMContext):
             
         await state.update_data(current_nutrition_page=target_page)
         
-        # Редактируем сообщение (И КЛАВИАТУРА ПОМЕНЯЕТСЯ САМА)
         await callback.message.edit_text(
             text=pages[target_page],
             reply_markup=get_pagination_kb(target_page, len(pages), page_type="nutrition"),

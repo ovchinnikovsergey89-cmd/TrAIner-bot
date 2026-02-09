@@ -1,58 +1,102 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
+from aiogram.enums import ParseMode
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Union
 
-from services.groq_service import GroqService
 from database.crud import UserCRUD
-from states.chat_states import AIChatState 
-from keyboards.main_menu import get_main_menu
+from services.groq_service import GroqService
+from states.chat_states import AIChatState
+from keyboards.builders import get_main_menu
 
 router = Router()
 
-@router.message(F.text == "💬 Чат с тренером")
-@router.callback_query(F.data == "ai_chat")
-async def start_chat_mode(event, state: FSMContext):
-    msg = event.message if isinstance(event, CallbackQuery) else event
-    if isinstance(event, CallbackQuery): await event.answer()
-        
-    await msg.answer(
-        "💬 <b>Режим чата активирован!</b>\n"
-        "Спроси меня о питании, технике или жизни.\n\n"
-        "<i>Напиши 'Стоп' для выхода.</i>",
-        parse_mode="HTML"
+def get_chat_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🔙 Вернуться в меню")]],
+        resize_keyboard=True
+    )
+
+# --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ЗАПУСКА ---
+async def start_chat_logic(message: Message, state: FSMContext):
+    # Инициализируем пустую историю
+    await state.update_data(chat_history=[]) 
+    
+    welcome_text = (
+        "👨‍✈️ <b>Тренер на связи!</b>\n\n"
+        "Я помню ваши параметры (вес, цель, возраст). Спрашивайте!\n"
+        "<i>(Например: 'Можно ли мне сладкое?' или 'Почему болят колени?')</i>"
+    )
+    
+    await message.answer(
+        welcome_text,
+        reply_markup=get_chat_kb(),
+        parse_mode=ParseMode.HTML
     )
     await state.set_state(AIChatState.chatting)
 
+# 1. ВХОД ЧЕРЕЗ ТЕКСТОВУЮ КНОПКУ
+@router.message(F.text == "💬 Чат с тренером")
+async def start_chat_text(message: Message, state: FSMContext):
+    await start_chat_logic(message, state)
+
+# 2. ВХОД ЧЕРЕЗ ИНЛАЙН-КНОПКУ (ВОПРОС ТРЕНЕРУ)
+@router.callback_query(F.data == "ai_chat")
+async def start_chat_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await start_chat_logic(callback.message, state)
+
+# 3. ОБРАБОТКА СООБЩЕНИЙ В ЧАТЕ
 @router.message(AIChatState.chatting)
 async def process_chat_message(message: Message, state: FSMContext, session: AsyncSession):
-    if message.text.lower() in ["стоп", "выход", "отмена"] or message.text.startswith("/"):
+    # Выход из чата
+    if message.text in ["🔙 Вернуться в меню", "🚪 Закончить тренировку (Выход)", "/start"]:
         await state.clear()
         await message.answer("Чат завершен.", reply_markup=get_main_menu())
         return
 
+    # Проверка профиля
     user = await UserCRUD.get_user(session, message.from_user.id)
-    
-    user_context = {
-        "name": user.name,
-        "weight": user.weight,
-        "goal": user.goal,
-        # 🔥 Передаем стиль
-        "trainer_style": user.trainer_style 
-    }
-    
+    if not user:
+        await message.answer("Заполни профиль!")
+        return
+
+    # --- 🔥 ДОБАВЛЯЕМ ИНДИКАЦИЮ "ПЕЧАТАЕТ" ---
+    loading_msg = await message.answer("💬 <i>Тренер пишет сообщение...</i>", parse_mode=ParseMode.HTML)
+    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    # ----------------------------------------
+
+    # Сохраняем сообщение пользователя
     data = await state.get_data()
-    history = data.get("history", [])
+    history = data.get("chat_history", [])
     history.append({"role": "user", "content": message.text})
     
-    wait_msg = await message.answer("<i>Печатает...</i>", parse_mode="HTML")
+    ai_service = GroqService()
     
-    ai = GroqService()
-    response = await ai.get_chat_response(history, user_context)
+    # Контекст
+    # 🔥 ИСПРАВЛЕНИЕ: Добавлен trainer_style
+    user_context = {
+        "gender": user.gender,
+        "weight": user.weight,
+        "height": user.height,
+        "age": user.age,
+        "goal": user.goal,
+        "activity_level": user.activity_level,
+        "name": user.name, # Желательно добавить и имя, если оно есть
+        "trainer_style": user.trainer_style # <--- ВОТ ЗДЕСЬ
+    }
     
-    await wait_msg.delete()
-    await message.answer(response)
+    try:
+        # Запрос к AI
+        answer = await ai_service.get_chat_response(history, user_context)
+    except Exception as e:
+        answer = "Прости, связь с сервером прервалась. Попробуй еще раз."
+
+    # Сохраняем ответ
+    history.append({"role": "assistant", "content": answer})
+    await state.update_data(chat_history=history)
     
-    history.append({"role": "assistant", "content": response})
-    if len(history) > 6: history = history[-6:]
-    await state.update_data(history=history)
+    # --- 🔥 УДАЛЯЕМ "ПЕЧАТАЕТ" И ОТПРАВЛЯЕМ ОТВЕТ ---
+    await loading_msg.delete()
+    await message.answer(answer, parse_mode=ParseMode.HTML)

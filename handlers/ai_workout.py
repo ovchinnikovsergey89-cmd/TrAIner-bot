@@ -7,7 +7,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Union
 
 from database.crud import UserCRUD
 from services.groq_service import GroqService 
@@ -20,15 +19,23 @@ router = Router()
 def clean_text(text: str) -> str:
     """Чистильщик текста"""
     if not text: return ""
+    
+    # 1. Превращаем Markdown жирный (**text**) в HTML (<b>text</b>)
+    # Обрабатываем варианты **Text**, ** Text **, *Text*
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'\*(.*?)\*', r'<b>\1</b>', text)
-    text = re.sub(r'(^|\n)(День \d+:.*?)(?=\n|$)', r'\1<b>\2</b>', text)
+    
+    # 2. Делаем жирными заголовки дней (если ИИ вдруг не выделил)
+    # Пример: "📅 10 окт (Пн)" станет жирным
+    text = re.sub(r'(^|\n)(📅.*?)(\n|$)', r'\1<b>\2</b>\3', text)
+    
+    # 3. Убираем лишний мусор
     text = text.replace("###", "").replace("SPLIT", "")
+    
     return text.strip()
 
 async def show_workout_pages(message: Message, state: FSMContext, pages: list, from_db: bool = False):
     """Показывает первую страницу программы"""
-    # Сохраняем страницы в память бота (FSM) для листания
     await state.update_data(workout_pages=pages, current_page=0)
     await state.set_state(WorkoutPagination.active)
     
@@ -41,8 +48,9 @@ async def show_workout_pages(message: Message, state: FSMContext, pages: list, f
     )
 
 # ==========================================
-# 1. КНОПКА "📅 Моя программа" (Только просмотр)
+# ОБРАБОТЧИКИ
 # ==========================================
+
 @router.message(F.text == "📅 Моя программа")
 async def show_saved_program(message: Message, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, message.from_user.id)
@@ -50,24 +58,15 @@ async def show_saved_program(message: Message, session: AsyncSession, state: FSM
         await message.answer("Сначала заполни профиль! (/start)")
         return
 
-    # Проверяем базу данных
     if user.current_workout_program:
         try:
-            # Превращаем JSON-строку обратно в список
             saved_pages = json.loads(user.current_workout_program)
             await show_workout_pages(message, state, saved_pages, from_db=True)
-        except Exception as e:
-            await message.answer("⚠️ Ошибка загрузки программы. Попробуйте создать новую.")
+        except Exception:
+            await message.answer("⚠️ Ошибка загрузки. Создайте новую.")
     else:
-        await message.answer(
-            "📭 <b>У тебя пока нет программы.</b>\n"
-            "Нажми <b>🤖 AI Тренировка</b>, чтобы создать её.",
-            parse_mode=ParseMode.HTML
-        )
+        await message.answer("📭 Нет программы. Нажми <b>🤖 AI Тренировка</b>.", parse_mode=ParseMode.HTML)
 
-# ==========================================
-# 2. КНОПКА "🤖 AI Тренировка" (Генерация)
-# ==========================================
 @router.message(Command("ai_workout"))
 @router.message(F.text == "🤖 AI Тренировка")
 async def request_ai_workout(message: Message, session: AsyncSession, state: FSMContext):
@@ -76,22 +75,18 @@ async def request_ai_workout(message: Message, session: AsyncSession, state: FSM
         await message.answer("❌ Сначала заполните профиль (/start)!", parse_mode=ParseMode.HTML)
         return
 
-    # Если программа уже есть — спрашиваем подтверждение
     if user.current_workout_program:
         confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Да, создать новую", callback_data="confirm_new_workout")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_workout")]
         ])
         await message.answer(
-            "⚠️ <b>Внимание!</b>\nУ тебя уже есть сохраненная программа. Если создать новую, старая удалится.\n\nПродолжить?",
-            reply_markup=confirm_kb,
-            parse_mode=ParseMode.HTML
+            "⚠️ У тебя уже есть программа. Создать новую?",
+            reply_markup=confirm_kb
         )
     else:
-        # Если пусто — генерируем сразу
         await generate_workout_process(message, session, user, state)
 
-# --- ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ ---
 @router.callback_query(F.data == "confirm_new_workout")
 async def confirm_generation(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     await callback.message.delete()
@@ -103,15 +98,14 @@ async def cancel_generation(callback: CallbackQuery):
     await callback.message.delete()
     await callback.answer("Отменено")
 
-# --- КНОПКА "🔄 Новая программа" (из пагинации) ---
 @router.callback_query(F.data == "regen_workout")
-@router.callback_query(F.data == "refresh_ai_workout") # На всякий случай поддерживаем старый callback
+@router.callback_query(F.data == "refresh_ai_workout")
 async def force_regen_workout(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    await callback.message.edit_text("🔄 Удаляю старую и создаю новую...")
+    await callback.message.edit_text("🔄 Пересоздаю...")
     user = await UserCRUD.get_user(session, callback.from_user.id)
     await generate_workout_process(callback.message, session, user, state)
 
-# --- ЛОГИКА ГЕНЕРАЦИИ (Service) ---
+# --- ЛОГИКА ГЕНЕРАЦИИ ---
 async def generate_workout_process(message: Message, session: AsyncSession, user, state: FSMContext):
     loading_msg = await message.answer("🗓 <b>AI составляет программу... (10-15 сек)</b>", parse_mode=ParseMode.HTML)
     
@@ -122,7 +116,8 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
             "gender": user.gender,
             "weight": user.weight,
             "age": user.age,
-            "workout_level": user.workout_level
+            "workout_level": user.workout_level,
+            "trainer_style": user.trainer_style 
         }
         
         ai_service = GroqService()
@@ -134,7 +129,6 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
 
         cleaned_pages = [clean_text(p) for p in raw_pages]
 
-        # 🔥 СОХРАНЯЕМ В БАЗУ ДАННЫХ 🔥
         pages_json = json.dumps(cleaned_pages, ensure_ascii=False)
         await UserCRUD.update_user(session, user.telegram_id, current_workout_program=pages_json)
 
@@ -144,9 +138,7 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
     except Exception as e:
         await loading_msg.edit_text(f"Ошибка: {e}")
 
-# ==========================================
-# 3. ЛИСТАЛКА (Пагинация)
-# ==========================================
+# --- ПАГИНАЦИЯ ---
 @router.callback_query(F.data.startswith("workout_page_"))
 async def change_page(callback: CallbackQuery, state: FSMContext):
     try:
@@ -155,25 +147,18 @@ async def change_page(callback: CallbackQuery, state: FSMContext):
         pages = data.get("workout_pages")
         
         if not pages:
-            await callback.answer("Данные устарели. Нажми 'Моя программа'", show_alert=True)
-            return
-            
+            await callback.answer("Данные устарели.", show_alert=True); return
         if target_page < 0 or target_page >= len(pages):
-            await callback.answer("Это крайняя страница")
-            return
+            await callback.answer("Край страницы"); return
             
         await state.update_data(current_page=target_page)
-        
         await callback.message.edit_text(
             text=pages[target_page],
             reply_markup=get_pagination_kb(target_page, len(pages), page_type="workout"),
             parse_mode=ParseMode.HTML
         )
-    except TelegramBadRequest:
-        await callback.answer()
-    except Exception:
-        await callback.answer()
+    except TelegramBadRequest: await callback.answer()
+    except Exception: await callback.answer()
 
 @router.callback_query(F.data == "noop")
-async def noop_btn(callback: CallbackQuery):
-    await callback.answer()
+async def noop_btn(callback: CallbackQuery): await callback.answer()
