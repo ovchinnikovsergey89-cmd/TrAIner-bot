@@ -23,7 +23,6 @@ class GroqService:
     # --- ОЧИСТКА ОТВЕТА ---
     def _clean_response(self, text: str) -> str:
         if not text: return ""
-        # Удаляем "мысли" (если модель r1) и маркеры кода
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         text = re.sub(r'^```html', '', text, flags=re.MULTILINE)
         text = re.sub(r'^```markdown', '', text, flags=re.MULTILINE)
@@ -33,7 +32,6 @@ class GroqService:
     # --- РАЗБИВКА ПО СТРАНИЦАМ ---
     def _smart_split(self, text: str) -> list[str]:
         text = self._clean_response(text)
-        # Разбиваем по разделителю
         pages = text.split("===PAGE_BREAK===")
         
         clean_pages = []
@@ -62,7 +60,7 @@ class GroqService:
             current_date += timedelta(days=step)
         return dates
 
-    # --- АНАЛИЗ ПРОГРЕССА (НОВОЕ) ---
+    # --- АНАЛИЗ ПРОГРЕССА (ВОТ ЭТОЙ ФУНКЦИИ НЕ БЫЛО) ---
     async def analyze_progress(self, user_data: dict, current_weight: float) -> str:
         if not self.client: return "Ошибка API"
         
