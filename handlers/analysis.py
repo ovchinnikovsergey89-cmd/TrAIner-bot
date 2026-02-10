@@ -1,10 +1,13 @@
+import logging
+import asyncio
+from typing import Union
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
+from aiogram.enums import ParseMode, ChatAction
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.enums import ParseMode
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Union
 
 from database.crud import UserCRUD
 from services.groq_service import GroqService
@@ -25,85 +28,79 @@ async def start_analysis(event: Union[Message, CallbackQuery], state: FSMContext
         await event.answer()
         message = event.message
     
-    msg_text = (
-        "📈 <b>Анализ прогресса</b>\n\n"
-        "Чтобы я мог оценить твой результат, напиши мне свой <b>текущий вес</b> (в кг).\n"
-        "<i>Например: 75.5</i>\n\n"
-        "Или нажми /cancel для отмены."
+    await message.answer(
+        "📈 <b>Введите ваш текущий вес (кг):</b>\nНапример: 75.5", 
+        parse_mode=ParseMode.HTML
     )
-    
-    await message.answer(msg_text, parse_mode=ParseMode.HTML)
     await state.set_state(AnalysisState.waiting_for_weight)
 
 # --- ОБРАБОТКА ВЕСА ---
 @router.message(AnalysisState.waiting_for_weight)
 async def process_analysis(message: Message, state: FSMContext, session: AsyncSession):
-    text = message.text.replace(',', '.')
-    if text.startswith('/'): return
+    await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
     try:
+        text = message.text.replace(',', '.')
         new_weight = float(text)
-        if not (30 <= new_weight <= 250): raise ValueError
-    except ValueError:
-        await message.answer("Пожалуйста, введите корректный вес числом (например: 80.5)")
+        if not (30 <= new_weight <= 300): raise ValueError
+    except:
+        await message.answer("⚠️ Пожалуйста, введите число (например: 80.5)")
         return
 
     user = await UserCRUD.get_user(session, message.from_user.id)
     if not user:
-        await message.answer("Ошибка: Профиль не найден. Нажмите /start")
+        await message.answer("Профиль не найден.")
         await state.clear()
         return
 
-    old_weight = user.weight or new_weight # Если старого нет, считаем что он равен новому
-    
-    # 🔥 МАТЕМАТИКА (Считаем сами, не доверяем ИИ цифры)
+    old_weight = float(user.weight) if user.weight else new_weight
     delta = new_weight - old_weight
     
-    if delta < 0:
-        trend = f"📉 Ты сбросил(а) {abs(delta):.1f} кг!"
-    elif delta > 0:
-        trend = f"📈 Ты набрал(а) {abs(delta):.1f} кг."
-    else:
-        trend = "⚖️ Вес не изменился."
+    if delta < -0.1: trend = f"📉 Минус {abs(delta):.1f} кг"
+    elif delta > 0.1: trend = f"📈 Плюс {abs(delta):.1f} кг"
+    else: trend = "⚖️ Вес без изменений"
 
-    msg = await message.answer(f"{trend}\n🧠 <b>Анализирую данные...</b>", parse_mode=ParseMode.HTML)
+    # Отправляем "Анализирую..."
+    temp_msg = await message.answer(f"{trend}\n🧠 <b>Анализирую прогресс...</b>", parse_mode=ParseMode.HTML)
 
-    # Запускаем AI с полным контекстом
     ai = GroqService()
-    user_data = {
-        "weight": old_weight, # Старый вес
-        "new_weight": new_weight, # Новый вес
-        "goal": user.goal,
-        "gender": user.gender,
-        "height": user.height, # Добавили рост для ИМТ
-        "age": user.age # Добавили возраст
-    }
-    
     try:
-        # В сервисе нужно будет использовать эти поля
-        feedback = await ai.analyze_progress(user_data, new_weight)
+        await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
         
-        # Чистка
-        if feedback:
-            feedback = feedback.replace("<p>", "").replace("</p>", "\n\n").replace("###", "")
-        else:
-            feedback = "Тренер задумался..."
-
+        feedback = await ai.analyze_progress({
+            "weight": old_weight, 
+            "goal": user.goal or "Форма"
+        }, new_weight)
+        
         # Обновляем БД
         await UserCRUD.update_user(session, message.from_user.id, weight=new_weight)
         
-        await msg.delete()
+        # Безопасно удаляем временное сообщение
+        try:
+            await temp_msg.delete()
+        except:
+            pass # Если уже удалено - не страшно
         
+        # Итоговое сообщение
         result_text = (
-            f"📊 <b>Результат:</b>\n"
-            f"{old_weight} кг ➡️ <b>{new_weight} кг</b>\n"
+            f"📊 <b>Результат:</b> {old_weight} -> <b>{new_weight} кг</b>\n"
             f"{trend}\n\n"
-            f"💬 <b>Совет тренера:</b>\n{feedback}"
+            f"{feedback}\n\n"
+            f"<i>Я обновил твой вес в профиле.</i>"
         )
         
-        await message.answer(result_text, reply_markup=get_main_menu(), parse_mode=ParseMode.HTML)
+        await message.answer(
+            result_text,
+            reply_markup=get_main_menu(),
+            parse_mode=ParseMode.HTML
+        )
         await state.clear()
         
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка анализа: {e}")
+        logging.error(f"Analysis handler error: {e}")
+        # Если была ошибка - не пытаемся редактировать temp_msg, а пишем новое
+        await message.answer("⚠️ Вес сохранен, но произошла ошибка при генерации совета от ИИ.")
+        
+        # На всякий случай сохраняем вес, если упало именно на AI
+        await UserCRUD.update_user(session, message.from_user.id, weight=new_weight)
         await state.clear()

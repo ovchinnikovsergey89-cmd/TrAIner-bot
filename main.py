@@ -89,13 +89,13 @@ async def main():
     
     # 1. Админка и общие команды
     dp.include_router(admin_router)
+    dp.include_router(analysis_router)
     dp.include_router(common_router)
     
     # 2. Основные модули (имеют приоритет над чатом)
     dp.include_router(start_router)
     dp.include_router(profile_router)
     dp.include_router(nutrition_router)
-    dp.include_router(analysis_router)  # 👈 ВАЖНО: Анализ должен быть ВЫШЕ чата
     dp.include_router(workout_router)
     dp.include_router(edit_router)
     dp.include_router(ai_workout_router)
