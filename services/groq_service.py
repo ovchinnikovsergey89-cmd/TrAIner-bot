@@ -38,7 +38,6 @@ class GroqService:
         
         clean_pages = []
         for p in pages:
-            # Убираем лишние пробелы в начале/конце страницы, но сохраняем структуру внутри
             stripped = p.strip()
             if len(stripped) > 20:
                 clean_pages.append(stripped)
@@ -62,6 +61,38 @@ class GroqService:
             dates.append(d_str)
             current_date += timedelta(days=step)
         return dates
+
+    # --- АНАЛИЗ ПРОГРЕССА (НОВОЕ) ---
+    async def analyze_progress(self, user_data: dict, current_weight: float) -> str:
+        if not self.client: return "Ошибка API"
+        
+        old_weight = user_data.get('weight', current_weight)
+        goal = user_data.get('goal', 'Форма')
+        
+        prompt = f"""
+        Ты — фитнес-эксперт. Проанализируй изменение веса.
+        
+        ДАННЫЕ:
+        - Было: {old_weight} кг
+        - Стало: {current_weight} кг
+        - Цель клиента: {goal}
+        
+        ЗАДАЧА:
+        Дай очень краткий комментарий (максимум 2-3 предложения).
+        Если динамика положительная (к цели) — похвали.
+        Если застой или откат — дай 1 конкретный совет без воды.
+        """
+        
+        try:
+            r = await self.client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=self.model,
+                temperature=0.6
+            )
+            return self._clean_response(r.choices[0].message.content)
+        except Exception as e:
+            logging.error(f"Analysis error: {e}")
+            return "Данные приняты! Продолжаем работу."
 
     # --- ГЕНЕРАЦИЯ ТРЕНИРОВКИ ---
     async def generate_workout_pages(self, user_data: dict) -> list[str]:
@@ -138,7 +169,6 @@ class GroqService:
         kcal = self._calculate_target_calories(user_data)
         goal = user_data.get('goal', 'Здоровье')
         
-        # Промпт специально настроен на отсутствие "болтовни"
         prompt = f"""
         Составь конструктор рациона на ~{kcal} ккал (Цель: {goal}).
         
@@ -201,11 +231,11 @@ class GroqService:
             else:
                 bmr = 10 * weight + 6.25 * height - 5 * age - 161
             
-            # Средняя активность
             return int(bmr * 1.375)
         except:
             return 2000
 
+    # --- ЧАТ ---
     async def get_chat_response(self, history: list, user_context: dict) -> str:
         if not self.client: return "Ошибка конфигурации API"
         

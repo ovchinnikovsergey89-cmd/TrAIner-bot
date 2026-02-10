@@ -3,7 +3,7 @@ import logging
 import sys
 import warnings
 
-# Глушим предупреждения
+# Глушим лишние предупреждения
 warnings.filterwarnings("ignore", message="Field.*has conflict with protected namespace")
 
 from typing import Callable, Dict, Any, Awaitable
@@ -28,16 +28,16 @@ from handlers.help import router as help_router
 from handlers.ai_chat import router as ai_chat_router
 from handlers.common import router as common_router
 from handlers.analysis import router as analysis_router
-from handlers.admin import router as admin_router  # 👈 Добавили админку
+from handlers.admin import router as admin_router
 
-# --- НАСТРОЙКА ЛОГИРОВАНИЯ (В ФАЙЛ + КОНСОЛЬ) ---
+# --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
     datefmt='%H:%M:%S',
     handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8'), # Пишем в файл
-        logging.StreamHandler(sys.stdout)                 # И в консоль
+        logging.FileHandler("bot.log", encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
     ]
 )
 
@@ -85,19 +85,26 @@ async def main():
     )
     scheduler.start()
     
-    # --- ПОДКЛЮЧАЕМ РОУТЕРЫ ---
-    # Важно: admin_router ставим одним из первых, чтобы перехватывать команды
-    dp.include_router(admin_router)
+    # --- ПОДКЛЮЧАЕМ РОУТЕРЫ (ПОРЯДОК ВАЖЕН!) ---
     
+    # 1. Админка и общие команды (отмена и т.д.) - должны быть первыми
+    dp.include_router(admin_router)
     dp.include_router(common_router)
+    
+    # 2. Основные функциональные модули (они имеют свои состояния)
     dp.include_router(start_router)
-    dp.include_router(ai_workout_router)
-    dp.include_router(ai_chat_router)
     dp.include_router(profile_router)
     dp.include_router(nutrition_router)
-    dp.include_router(analysis_router)
+    dp.include_router(analysis_router)  # 👈 Анализ теперь имеет приоритет над чатом
     dp.include_router(workout_router)
     dp.include_router(edit_router)
+    dp.include_router(ai_workout_router)
+
+    # 3. Чат с ИИ (ловит все остальные текстовые сообщения)
+    # Ставим его В КОНЕЦ, чтобы он не перехватывал ввод веса и других данных
+    dp.include_router(ai_chat_router)
+    
+    # 4. Помощь (если пользователь ввел команду /help)
     dp.include_router(help_router)
     
     print("\n" + "=" * 40)
