@@ -1,11 +1,15 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func
+from sqlalchemy import select, func, desc
+from datetime import datetime, timedelta
 from database.models import User
 
 class UserCRUD:
     
+    # --- 🟢 ОСНОВНЫЕ МЕТОДЫ (Для работы бота) ---
+
     @staticmethod
     async def get_or_create_user(session: AsyncSession, telegram_id: int, **kwargs):
+        """Получает пользователя или создает нового, если его нет"""
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
@@ -18,11 +22,30 @@ class UserCRUD:
             await session.refresh(user)
         
         return user
+
+    @staticmethod
+    async def add_user(session: AsyncSession, telegram_id: int, **kwargs):
+        """
+        Обертка для совместимости со старым кодом. 
+        Делает то же самое, что и get_or_create_user.
+        """
+        return await UserCRUD.get_or_create_user(session, telegram_id, **kwargs)
+
+    @staticmethod
+    async def get_user(session: AsyncSession, telegram_id: int):
+        """Просто получить пользователя (без создания)"""
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        return result.scalar_one_or_none()
     
     @staticmethod
     async def update_user(session: AsyncSession, telegram_id: int, **kwargs):
-        """Обновляет ТОЛЬКО переданные поля, игнорируя None"""
-        # 🔥 ВАЖНО: Фильтруем None, чтобы не стереть другие данные
+        """
+        Обновляет данные пользователя.
+        ВАЖНО: Игнорирует пустые значения (None), чтобы случайно не стереть данные.
+        """
+        # Фильтруем мусор, оставляем только реальные данные
         clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
         result = await session.execute(
@@ -35,105 +58,57 @@ class UserCRUD:
                 if hasattr(user, key):
                     setattr(user, key, value)
             
-            await session.commit()
-            return True
-        return False
-
-    @staticmethod
-    async def get_user(session: AsyncSession, telegram_id: int):
-        result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
-        )
-        return result.scalar_one_or_none()
-    
-    @staticmethod
-    async def get_stats(session: AsyncSession):
-        total = await session.scalar(select(func.count(User.telegram_id)))
-        active = await session.scalar(select(func.count(User.telegram_id)).where(User.weight.isnot(None)))
-        workouts = await session.scalar(select(func.count(User.telegram_id)).where(User.current_workout_program.isnot(None)))
-        nutrition = await session.scalar(select(func.count(User.telegram_id)).where(User.current_nutrition_program.isnot(None)))
-        
-        return {"total": total, "active": active, "workouts": workouts, "nutrition": nutrition}
-    
-    @staticmethod
-    async def get_or_create_user(session: AsyncSession, telegram_id: int, **kwargs):
-        """Получить или создать пользователя (Тихий режим)"""
-        result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
-        )
-        user = result.scalar_one_or_none()
-        
-        if user is None:
-            user = User(telegram_id=telegram_id, **kwargs)
-            session.add(user)
+            # Обновляем время активности
+            if hasattr(user, 'updated_at'):
+                user.updated_at = datetime.now()
+                
             await session.commit()
             await session.refresh(user)
-        
         return user
-    
-    @staticmethod
-    async def add_user(session: AsyncSession, telegram_id: int):
-        """Создать пользователя (обертка)"""
-        await UserCRUD.get_or_create_user(session, telegram_id)
-    
-    @staticmethod
-    async def update_user(session: AsyncSession, telegram_id: int, **kwargs):
-        """Обновить данные пользователя (Тихий режим)"""
-        clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
-        result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
-        )
-        user = result.scalar_one_or_none()
-        
-        if user:
-            for key, value in clean_kwargs.items():
-                if hasattr(user, key):
-                    setattr(user, key, value)
-            await session.commit()
-            return True
-        else:
-            return False
-    
-    @staticmethod
-    async def get_user(session: AsyncSession, telegram_id: int):
-        """Получить пользователя по telegram_id"""
-        result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
-        )
-        return result.scalar_one_or_none()
-    
+    # --- 🔴 НОВЫЕ МЕТОДЫ (Для админки и рассылки) ---
+
     @staticmethod
     async def get_all_users(session: AsyncSession):
-        """Получить всех пользователей (для рассылки)"""
+        """Получить список ВСЕХ пользователей (для рассылки)"""
         result = await session.execute(select(User))
         return result.scalars().all()
 
-    # --- 👇 НОВАЯ ФУНКЦИЯ СТАТИСТИКИ 👇 ---
     @staticmethod
     async def get_stats(session: AsyncSession):
-        """Собирает статистику по пользователям"""
-        # Всего пользователей
-        total_users = await session.scalar(select(func.count(User.telegram_id)))
+        """Собирает статистику для команды /admin"""
+        # 1. Всего пользователей
+        total = await session.scalar(select(func.count(User.telegram_id))) or 0
         
-        # Пользователей с заполненным весом (считаем их активными)
-        active_users = await session.scalar(
+        # 2. Активные профили (вес указан)
+        active = await session.scalar(
             select(func.count(User.telegram_id)).where(User.weight.isnot(None))
-        )
+        ) or 0
         
-        # Пользователей с программой тренировок
-        workout_users = await session.scalar(
+        # 3. Есть программа тренировок
+        workouts = await session.scalar(
             select(func.count(User.telegram_id)).where(User.current_workout_program.isnot(None))
-        )
+        ) or 0
         
-        # Пользователей с меню питания
-        nutrition_users = await session.scalar(
+        # 4. Есть программа питания
+        nutrition = await session.scalar(
             select(func.count(User.telegram_id)).where(User.current_nutrition_program.isnot(None))
-        )
-        
+        ) or 0
+
+        # 5. Активные за последние 24 часа
+        active_24h = 0
+        try:
+            one_day_ago = datetime.now() - timedelta(days=1)
+            active_24h = await session.scalar(
+                select(func.count(User.telegram_id)).where(User.updated_at >= one_day_ago)
+            ) or 0
+        except:
+            pass # Если вдруг в базе нет поля updated_at
+
         return {
-            "total": total_users,
-            "active": active_users,
-            "workouts": workout_users,
-            "nutrition": nutrition_users
+            'total': total,
+            'active_profile': active,
+            'has_workout': workouts,
+            'has_nutrition': nutrition,
+            'active_24h': active_24h
         }

@@ -1,124 +1,104 @@
 import asyncio
 import logging
 import sys
-import warnings
-
-# Глушим лишние предупреждения
-warnings.filterwarnings("ignore", message="Field.*has conflict with protected namespace")
-
-from typing import Callable, Dict, Any, Awaitable
-from aiogram import Bot, Dispatcher, BaseMiddleware
+from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import TelegramObject
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler # Добавили планировщик
 
 from config import Config
-from database.database import init_db, AsyncSessionLocal
-from services.scheduler import send_morning_motivation
+from database.database import init_db, async_session
+from handlers import start, help, profile, workout, nutrition, ai_workout, ai_chat, analysis, admin, edit
+from middlewares.db_middleware import DbSessionMiddleware
+from services.scheduler import send_morning_motivation # Импортируем нашу функцию
 
-# --- ИМПОРТЫ ХЕНДЛЕРОВ ---
-from handlers.start import router as start_router
-from handlers.profile import router as profile_router
-from handlers.ai_workout import router as ai_workout_router
-from handlers.nutrition import router as nutrition_router
-from handlers.workout import router as workout_router
-from handlers.edit import router as edit_router
-from handlers.help import router as help_router
-from handlers.ai_chat import router as ai_chat_router
-from handlers.common import router as common_router
-from handlers.analysis import router as analysis_router
-from handlers.admin import router as admin_router
-
-# --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
+# Логирование
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(message)s',
-    datefmt='%H:%M:%S',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("bot.log", encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
+logger = logging.getLogger(__name__)
 
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("aiogram.event").setLevel(logging.WARNING)
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-
-# --- MIDDLEWARE ДЛЯ БД ---
-class DBSessionMiddleware(BaseMiddleware):
-    async def __call__(
-        self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
-        event: TelegramObject,
-        data: Dict[str, Any],
-    ) -> Any:
-        async with AsyncSessionLocal() as session:
-            data["session"] = session
-            return await handler(event, data)
+async def on_startup(bot: Bot):
+    """Действия при запуске бота"""
+    # Если в config.py есть ADMIN_IDS, уведомим их
+    if Config.ADMIN_IDS:
+        try:
+            for admin_id in Config.ADMIN_IDS:
+                await bot.send_message(admin_id, "🚀 <b>TrAIner запущен и готов к работе!</b>")
+        except:
+            pass
 
 async def main():
-    Config.validate()
-    
+    logger.info("🚀 Запуск бота TrAIner...")
+
+    # 1. Инициализация БД
     try:
         await init_db()
+        logger.info("✅ База данных подключена")
     except Exception as e:
-        logging.error(f"❌ Ошибка БД: {e}")
+        logger.critical(f"❌ Ошибка подключения к БД: {e}")
         return
-    
+
+    # 2. Настройка бота
     bot = Bot(
-        token=Config.BOT_TOKEN, 
+        token=Config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     dp = Dispatcher()
-    
-    dp.update.middleware(DBSessionMiddleware())
 
+    # 3. Подключаем миддлвари
+    dp.update.middleware(DbSessionMiddleware(session_pool=async_session))
+
+    # 4. Настройка Планировщика (Scheduler)
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+    
+    # Задача: Каждое утро в 08:00
     scheduler.add_job(
         send_morning_motivation, 
         trigger='cron', 
-        hour=9, 
+        hour=8, 
         minute=0, 
-        kwargs={'bot': bot, 'session_pool': AsyncSessionLocal}
+        kwargs={'bot': bot, 'session_pool': async_session}
     )
     scheduler.start()
-    
-    # --- ПОДКЛЮЧАЕМ РОУТЕРЫ (ВАЖЕН ПОРЯДОК!) ---
-    
-    # 1. Админка и общие команды
-    dp.include_router(admin_router)
-    dp.include_router(analysis_router)
-    dp.include_router(common_router)
-    
-    # 2. Основные модули (имеют приоритет над чатом)
-    dp.include_router(start_router)
-    dp.include_router(profile_router)
-    dp.include_router(nutrition_router)
-    dp.include_router(workout_router)
-    dp.include_router(edit_router)
-    dp.include_router(ai_workout_router)
-    
-    # 3. Помощь
-    dp.include_router(help_router)
+    logger.info("⏰ Планировщик запущен (08:00 MSK)")
 
-    # 4. Чат с ИИ (ловит всё остальное) - СТАВИМ В САМЫЙ КОНЕЦ
-    dp.include_router(ai_chat_router)
-    
-    print("\n" + "=" * 40)
-    print("🚀 TrAIner Bot успешно запущен!")
-    print(f"👤 Бот: @{(await bot.get_me()).username}")
-    print("📝 Логи пишутся в bot.log")
-    print("=" * 40 + "\n")
-    
+    # 5. Регистрация роутеров
+    dp.include_routers(
+        admin.router,
+        start.router,
+        profile.router,
+        workout.router,
+        ai_workout.router,
+        nutrition.router,
+        analysis.router,
+        ai_chat.router,
+        edit.router,
+        help.router
+    )
+
+    # 6. Запуск
+    await on_startup(bot)
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    logger.info("🤖 Бот начал прослушивание...")
+    
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"❌ Бот упал с ошибкой: {e}")
+    finally:
+        await bot.session.close()
+        logger.info("🛑 Бот остановлен")
 
 if __name__ == "__main__":
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
-        if sys.platform == "win32":
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Бот остановлен")
+        logger.info("👋 Выход по Ctrl+C")
