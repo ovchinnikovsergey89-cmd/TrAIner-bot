@@ -1,5 +1,5 @@
 from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func
-from database.database import Base # Импортируем Base, который мы создали выше
+from database.database import Base 
 
 class User(Base):
     __tablename__ = 'users'
@@ -18,7 +18,7 @@ class User(Base):
     current_workout_program = Column(String, nullable=True)
     current_nutrition_program = Column(String, nullable=True)
     
-    trainer_style = Column(String, default="supportive")
+    # trainer_style удален
     
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())

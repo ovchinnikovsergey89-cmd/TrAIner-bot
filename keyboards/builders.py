@@ -13,10 +13,10 @@ def get_main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="📅 Моя программа")
     )
     
-    # 2-й ряд: Питание (РАЗДЕЛИЛИ НА ДВЕ КНОПКИ)
+    # 2-й ряд: Питание
     builder.row(
         KeyboardButton(text="🍏 Питание"),      # Генерирует новое
-        KeyboardButton(text="🍽 Мое питание")   # Показывает старое
+        KeyboardButton(text="🍽 Мое меню")   # Показывает старое
     )
     
     # 3-й ряд: Инструменты
@@ -37,11 +37,6 @@ def get_main_menu() -> ReplyKeyboardMarkup:
     )
     
     return builder.as_markup(resize_keyboard=True)
-
-# ... (Остальные функции клавиатур без изменений: get_gender_keyboard и т.д.) ...
-# Вставь сюда остальные функции (get_gender_keyboard, get_activity_keyboard и т.д.)
-# из твоего предыдущего файла, они не меняются.
-# Но для удобства, вот код полных функций ниже, если нужно скопировать целиком:
 
 def get_gender_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
@@ -77,13 +72,6 @@ def get_workout_days_keyboard() -> ReplyKeyboardMarkup:
         builder.add(KeyboardButton(text=f"{i} {day_text}"))
     builder.adjust(3)
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
-
-def get_trainer_style_keyboard() -> ReplyKeyboardMarkup:
-    builder = ReplyKeyboardBuilder()
-    builder.row(KeyboardButton(text="🔥 Тони (Мотиватор)"))
-    builder.row(KeyboardButton(text="💀 Батя (Жесткий)"))
-    builder.row(KeyboardButton(text="🧐 Доктор (Научный)"))
-    return builder.as_markup(resize_keyboard=True)
 
 def get_profile_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()

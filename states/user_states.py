@@ -10,7 +10,7 @@ class UserForm(StatesGroup):
     goal = State()
     workout_level = State()
     workout_days = State()
-    trainer_style = State() # 🔥 Добавили новый шаг
+    # trainer_style удален
     
 class EditForm(StatesGroup):
     weight = State()

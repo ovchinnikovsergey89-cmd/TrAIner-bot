@@ -60,8 +60,8 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
     elif delta > 0.1: trend = f"📈 Плюс {abs(delta):.1f} кг"
     else: trend = "⚖️ Вес без изменений"
 
-    # Отправляем "Анализирую..."
-    temp_msg = await message.answer(f"{trend}\n🧠 <b>Анализирую прогресс...</b>", parse_mode=ParseMode.HTML)
+    # 🔥 ИЗМЕНЕНО: Пишет Тренер
+    temp_msg = await message.answer(f"{trend}\n📊 <b>Тренер оценивает прогресс...</b>", parse_mode=ParseMode.HTML)
 
     ai = GroqService()
     try:
@@ -75,18 +75,17 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
         # Обновляем БД
         await UserCRUD.update_user(session, message.from_user.id, weight=new_weight)
         
-        # Безопасно удаляем временное сообщение
         try:
             await temp_msg.delete()
         except:
-            pass # Если уже удалено - не страшно
+            pass
         
         # Итоговое сообщение
         result_text = (
             f"📊 <b>Результат:</b> {old_weight} -> <b>{new_weight} кг</b>\n"
             f"{trend}\n\n"
             f"{feedback}\n\n"
-            f"<i>Я обновил твой вес в профиле.</i>"
+            f"<i>Тренер обновил твой вес в профиле.</i>"
         )
         
         await message.answer(
@@ -98,9 +97,6 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
         
     except Exception as e:
         logging.error(f"Analysis handler error: {e}")
-        # Если была ошибка - не пытаемся редактировать temp_msg, а пишем новое
-        await message.answer("⚠️ Вес сохранен, но произошла ошибка при генерации совета от ИИ.")
-        
-        # На всякий случай сохраняем вес, если упало именно на AI
+        await message.answer("⚠️ Вес сохранен, но Тренер не смог дать комментарий (ошибка сети).")
         await UserCRUD.update_user(session, message.from_user.id, weight=new_weight)
         await state.clear()

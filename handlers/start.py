@@ -11,14 +11,12 @@ from sqlalchemy import select
 from states.user_states import UserForm
 from database.models import User
 
-# Импортируем клавиатуры, ВКЛЮЧАЯ НОВУЮ
 from keyboards.builders import (
     get_gender_keyboard,
     get_activity_keyboard,
     get_goal_keyboard,
     get_workout_level_keyboard,
-    get_workout_days_keyboard,
-    get_trainer_style_keyboard # <--- Важно добавить импорт
+    get_workout_days_keyboard
 )
 from keyboards.main_menu import get_main_menu
 
@@ -156,10 +154,8 @@ async def process_workout_level(message: Message, state: FSMContext):
     await message.answer("Сколько дней в неделю готовы тренироваться?", reply_markup=get_workout_days_keyboard())
     await state.set_state(UserForm.workout_days)
 
-# --- ИЗМЕНЕНИЯ НАЧИНАЮТСЯ ЗДЕСЬ ---
-
 @router.message(UserForm.workout_days)
-async def process_workout_days(message: Message, state: FSMContext):
+async def process_workout_days(message: Message, state: FSMContext, session: AsyncSession):
     text = message.text
     days = 3
     if text.isdigit():
@@ -173,25 +169,7 @@ async def process_workout_days(message: Message, state: FSMContext):
     
     await state.update_data(workout_days=days)
     
-    # 🔥 ВМЕСТО СОХРАНЕНИЯ СПРАШИВАЕМ ТРЕНЕРА
-    await message.answer(
-        "🎭 <b>Последний шаг: Выберите тренера!</b>\n\n"
-        "🔥 <b>Тони:</b> Друг, мотиватор, позитив.\n"
-        "💀 <b>Батя:</b> Жесткий, суровый, старая школа.\n"
-        "🧐 <b>Доктор:</b> Научный подход, факты, биохакинг.",
-        reply_markup=get_trainer_style_keyboard(),
-        parse_mode=ParseMode.HTML
-    )
-    await state.set_state(UserForm.trainer_style)
-
-@router.message(UserForm.trainer_style)
-async def process_trainer_style(message: Message, state: FSMContext, session: AsyncSession):
-    # Определяем стиль
-    style = "supportive" # По умолчанию Тони
-    if "Батя" in message.text: style = "tough"
-    elif "Доктор" in message.text: style = "scientific"
-    
-    # 🔥 ТЕПЕРЬ СОХРАНЯЕМ ВСЁ В БД
+    # --- СОХРАНЯЕМ В БД ---
     data = await state.get_data()
     telegram_id = message.from_user.id
     first_name = message.from_user.first_name
@@ -212,24 +190,17 @@ async def process_trainer_style(message: Message, state: FSMContext, session: As
     user.goal = data.get('goal')
     user.workout_level = data.get('workout_level')
     user.workout_days = data.get('workout_days')
-    user.trainer_style = style # <--- Сохраняем стиль
     
     await session.commit()
     await state.clear()
     
     safe_name = html.escape(first_name)
     
-    # Персонализированное приветствие
-    welcome_text = "Добро пожаловать в команду!"
-    if style == "tough": welcome_text = "Ну наконец-то. Хватит болтать, за работу! 👊"
-    elif style == "scientific": welcome_text = "Данные приняты. Система настроена. Приступаем. 🧬"
-    elif style == "supportive": welcome_text = "Супер! Я так рад, что ты здесь! Погнали! 🔥"
-
     summary = (
-        f"✅ <b>Профиль создан!</b>\n\n"
+        f"✅ <b>Профиль успешно создан!</b>\n\n"
         f"👤 Имя: {safe_name}\n"
         f"📊 Вес: {data.get('weight')} кг\n"
-        f"🎭 Тренер: {message.text}\n\n"
-        f"<i>{welcome_text}</i>"
+        f"🎯 Цель: {message.text}\n\n"
+        f"Теперь я могу составлять для тебя программы тренировок и питания! Жми кнопки в меню 👇"
     )
     await message.answer(summary, reply_markup=get_main_menu(), parse_mode=ParseMode.HTML)

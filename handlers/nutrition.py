@@ -30,14 +30,13 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 async def show_pages(message: Message, state: FSMContext, pages: list, from_db: bool = False):
-    # 🔥 ГАРАНТИЯ: Если pages - это не список, а строка, превращаем в список
     if isinstance(pages, str):
         pages = [pages]
         
     await state.update_data(nutrition_pages=pages, current_nutrition_page=0)
     await state.set_state(WorkoutPagination.active)
     
-    prefix = "💾 <b>Твое меню:</b>\n\n" if from_db else "✅ <b>Конструктор готов:</b>\n\n"
+    prefix = "💾 <b>Твое меню:</b>\n\n" if from_db else "✅ <b>Тренер составил меню:</b>\n\n"
     
     try:
         await message.answer(
@@ -57,11 +56,9 @@ async def show_my_nutrition(message: Message, session: AsyncSession, state: FSMC
         return
     if user.current_nutrition_program:
         try:
-            # Пытаемся загрузить JSON (список страниц)
             pages = json.loads(user.current_nutrition_program)
             await show_pages(message, state, pages, from_db=True)
         except: 
-            # Если там старый формат (просто текст), показываем как одну страницу
             pages = [user.current_nutrition_program]
             await show_pages(message, state, pages, from_db=True)
     else:
@@ -79,7 +76,7 @@ async def request_ai_nutrition(message: Message, session: AsyncSession, state: F
             [InlineKeyboardButton(text="✅ Новое меню", callback_data="confirm_new_nutrition")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_nutrition")]
         ])
-        await message.answer("У тебя уже есть меню. Создать новое?", reply_markup=confirm_kb)
+        await message.answer("Тренер уже составлял меню. Сделать новое?", reply_markup=confirm_kb)
     else:
         await generate_nutrition_process(message, session, user, state)
 
@@ -95,29 +92,24 @@ async def cancel_generation(callback: CallbackQuery):
     await callback.answer("Отменено")
 
 async def generate_nutrition_process(message: Message, session: AsyncSession, user, state: FSMContext):
-    names = {"tough": "💀 Батя", "scientific": "🧐 Доктор", "supportive": "🔥 Тони"}
-    trainer_name = names.get(user.trainer_style, "AI")
-    
-    status_msg = await message.answer(f"🍏 <b>{trainer_name} собирает конструктор еды...</b>", parse_mode=ParseMode.HTML)
+    # 🔥 ИЗМЕНЕНО: Пишет Тренер
+    status_msg = await message.answer(f"🍏 <b>Тренер рассчитывает калории и подбирает продукты...</b>", parse_mode=ParseMode.HTML)
     
     try:
         user_data = {
             "goal": user.goal, "gender": user.gender, "weight": user.weight, 
             "age": user.age, "activity_level": user.activity_level, "height": user.height,
-            "trainer_style": user.trainer_style
         }
         
         ai = GroqService()
         raw_pages = await ai.generate_nutrition_pages(user_data)
         
-        # Чистим каждую страницу
         cleaned_pages = [clean_text(p) for p in raw_pages if len(p) > 20]
         
         if not cleaned_pages:
-            await status_msg.edit_text("⚠️ Ошибка ИИ (пустой ответ).")
+            await status_msg.edit_text("⚠️ Тренер задумался и ничего не ответил. Попробуй еще раз.")
             return
 
-        # Сохраняем СПИСОК СТРАНИЦ
         pages_json = json.dumps(cleaned_pages, ensure_ascii=False)
         await UserCRUD.update_user(session, user.telegram_id, current_nutrition_program=pages_json)
         
@@ -151,8 +143,8 @@ async def change_nutrition_page(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "regen_nutrition")
 async def force_regen_nutrition(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    try: await callback.message.edit_text("🔄 Пересоздаю...")
-    except: await callback.message.answer("🔄 Пересоздаю...")
+    try: await callback.message.edit_text("🔄 Тренер переделывает...")
+    except: await callback.message.answer("🔄 Тренер переделывает...")
     
     user = await UserCRUD.get_user(session, callback.from_user.id)
     await generate_nutrition_process(callback.message, session, user, state)

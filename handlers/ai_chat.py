@@ -72,7 +72,7 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
     
     ai_service = GroqService()
     
-    # 🔥 КОНТЕКСТ С УЧЕТОМ СТИЛЯ 🔥
+    # 🔥 КОНТЕКСТ БЕЗ СТИЛЯ 🔥
     user_context = {
         "gender": user.gender,
         "weight": user.weight,
@@ -80,8 +80,7 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
         "age": user.age,
         "goal": user.goal,
         "activity_level": user.activity_level,
-        "name": user.name,
-        "trainer_style": user.trainer_style  # <--- ДОБАВИЛ
+        "name": user.name
     }
     
     try:

@@ -28,8 +28,6 @@ ACTIVITY_MAP = {
     "sedentary": "🪑 Сидячий", "light": "🚶 Малая", 
     "moderate": "🏃 Средняя", "high": "🏋️ Высокая", "extreme": "🔥 Экстремальная"
 }
-# 🔥 ОБНОВЛЕННЫЕ ИМЕНА ТРЕНЕРОВ
-STYLE_MAP = {"supportive": "🔥 Тони (Мотиватор)", "tough": "💀 Батя (Жесткий)", "scientific": "🧐 Доктор (Научный)"}
 
 # --- ФУНКЦИЯ ГЕНЕРАЦИИ ТЕКСТА ---
 def get_profile_text(user):
@@ -43,7 +41,6 @@ def get_profile_text(user):
     act_val = user.activity_level
     txt_activity = ACTIVITY_MAP.get(act_val, act_val) if act_val else "-"
     txt_days = f"{user.workout_days} дн/нед" if user.workout_days else "-"
-    txt_style = STYLE_MAP.get(user.trainer_style, "🔥 Тони")
 
     return (
         f"👤 <b>Профиль: {txt_name}</b>\n"
@@ -54,9 +51,7 @@ def get_profile_text(user):
         f"🏃 <b>Активность:</b> {txt_activity}\n"
         f"🎯 <b>Цель:</b> {txt_goal}\n"
         f"💪 <b>Уровень:</b> {txt_level}\n"
-        f"📅 <b>Режим:</b> {txt_days}\n"
-        f"──────────────────\n"
-        f"🎭 <b>Тренер:</b> {txt_style}"
+        f"📅 <b>Режим:</b> {txt_days}"
     )
 
 # --- 1. ПРОСМОТР ПРОФИЛЯ ---
@@ -110,8 +105,7 @@ async def show_edit_menu(event, session: AsyncSession, state: FSMContext):
         InlineKeyboardButton(text="📅 Дни", callback_data="prof_days")
     )
     kb.row(
-        InlineKeyboardButton(text="👫 Пол", callback_data="prof_gender"),
-        InlineKeyboardButton(text="🎭 Тренер", callback_data="prof_style")
+        InlineKeyboardButton(text="👫 Пол", callback_data="prof_gender")
     )
     kb.row(InlineKeyboardButton(text="✅ Готово (Закрыть)", callback_data="close_edit_menu"))
 
@@ -251,23 +245,3 @@ async def save_gender(message: Message, session: AsyncSession, state: FSMContext
     await UserCRUD.update_user(session, message.from_user.id, gender=code)
     await message.answer("✅ Пол обновлен.", reply_markup=get_main_menu())
     await return_to_edit(message, session, state)
-
-# 🔥 ВШИТАЯ КЛАВИАТУРА ВЫБОРА СТИЛЯ
-def get_style_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🔥 Тони (Мотиватор)", callback_data="set_style_supportive"))
-    builder.row(InlineKeyboardButton(text="💀 Батя (Жесткий)", callback_data="set_style_tough"))
-    builder.row(InlineKeyboardButton(text="🧐 Доктор (Научный)", callback_data="set_style_scientific"))
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="open_edit_menu"))
-    return builder.as_markup()
-
-@router.callback_query(F.data == "prof_style")
-async def ask_style(callback: CallbackQuery):
-    await callback.message.edit_text("🎭 Выберите характер тренера:", reply_markup=get_style_keyboard())
-
-@router.callback_query(F.data.startswith("set_style_"))
-async def save_style(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    style = callback.data.replace("set_style_", "")
-    await UserCRUD.update_user(session, callback.from_user.id, trainer_style=style)
-    # Возвращаемся в меню редактирования
-    await show_edit_menu(callback, session, state)
