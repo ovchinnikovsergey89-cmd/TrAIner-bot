@@ -32,9 +32,9 @@ def get_main_menu() -> ReplyKeyboardMarkup:
     )
     
     # 5-й ряд: Настройки
-    builder.row(
-        KeyboardButton(text="🔄 Изменить данные")
-    )
+    #builder.row(
+        #KeyboardButton(text="🔄 Изменить данные")
+    #)
     
     return builder.as_markup(resize_keyboard=True)
 
@@ -45,18 +45,18 @@ def get_gender_keyboard() -> ReplyKeyboardMarkup:
 
 def get_activity_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
-    builder.add(KeyboardButton(text="Сидячий (без спорта)"))
-    builder.add(KeyboardButton(text="Малая (1-3 тренировки)"))
-    builder.add(KeyboardButton(text="Средняя (3-5 тренировок)"))
-    builder.add(KeyboardButton(text="Высокая (6-7 тренировок)"))
-    builder.add(KeyboardButton(text="Экстремальная (физ. труд)"))
+    builder.add(KeyboardButton(text="🪑Сидячий (без спорта)"))
+    builder.add(KeyboardButton(text="👶Малая (1-3 тренировки)"))
+    builder.add(KeyboardButton(text="🏃Средняя (3-5 тренировок)"))
+    builder.add(KeyboardButton(text="🏋️‍♂️Высокая (6-7 тренировок)"))
+    builder.add(KeyboardButton(text="🔥Экстремальная (физ. труд)"))
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
 def get_goal_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     builder.row(KeyboardButton(text="📉 Похудение"), KeyboardButton(text="⚖️ Поддержание"))
-    builder.row(KeyboardButton(text="💪 Набор массы"))
+    builder.row(KeyboardButton(text="💪 Набор массы"), KeyboardButton(text="🔄 Рекомпозиция"))
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
 def get_workout_level_keyboard() -> ReplyKeyboardMarkup:
@@ -75,6 +75,6 @@ def get_workout_days_keyboard() -> ReplyKeyboardMarkup:
 
 def get_profile_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
-    builder.row(KeyboardButton(text="🔄 Изменить данные"))
+    # builder.row(KeyboardButton(text="🔄 Изменить данные"))
     builder.row(KeyboardButton(text="🔙 В главное меню"))
     return builder.as_markup(resize_keyboard=True)
