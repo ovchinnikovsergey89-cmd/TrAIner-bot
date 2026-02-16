@@ -8,7 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import Config
 from database.database import init_db, async_session
-# 👇 Добавили common в импорт
+# 👇 Порядок импортов не важен, важен порядок в include_routers
 from handlers import start, help, profile, workout, nutrition, ai_workout, ai_chat, analysis, admin, edit, common
 from middlewares.db_middleware import DbSessionMiddleware
 from services.scheduler import send_morning_motivation
@@ -60,16 +60,17 @@ async def main():
     scheduler.start()
     logger.info("⏰ Планировщик запущен (08:00 MSK)")
 
-    # 👇 Добавили common.router в список
+    # 👇 ИЗМЕНЕН ПОРЯДОК РОУТЕРОВ
+    # analysis.router поднят НАВЕРХ, чтобы перехватывать ввод веса
     dp.include_routers(
         admin.router,
-        common.router,  # <--- ВОТ ОН (обработка /cancel и видео)
+        common.router,  
+        analysis.router, # <--- ПЕРЕНЕСЛИ СЮДА (теперь он приоритетнее профиля)
         start.router,
         profile.router,
         workout.router,
         ai_workout.router,
         nutrition.router,
-        analysis.router,
         ai_chat.router,
         edit.router,
         help.router

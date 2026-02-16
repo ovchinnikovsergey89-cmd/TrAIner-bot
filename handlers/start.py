@@ -1,206 +1,170 @@
-import html
+import logging
 import re
-from aiogram import Router, F, types
+from aiogram import Router, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
-from aiogram.enums import ParseMode
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
-from states.user_states import UserForm
-from database.models import User
-
+from database.crud import UserCRUD
+from database.models import WeightHistory
+from states.user_states import Registration
 from keyboards.builders import (
-    get_gender_keyboard,
-    get_activity_keyboard,
+    get_gender_keyboard, 
+    get_activity_keyboard, 
     get_goal_keyboard,
     get_workout_level_keyboard,
-    get_workout_days_keyboard
+    get_workout_days_keyboard,
+    get_main_menu
 )
-from keyboards.main_menu import get_main_menu
 
 router = Router()
+logger = logging.getLogger(__name__)
 
-# --- 1. ЛОГИКА /start ---
+# --- СТАРТ ---
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext, session: AsyncSession):
-    await state.clear()
-    telegram_id = message.from_user.id
-    
-    result = await session.execute(select(User).filter_by(telegram_id=telegram_id))
-    user = result.scalar_one_or_none()
+async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
+    user = await UserCRUD.get_user(session, message.from_user.id)
     
     if user:
-        db_name = user.name if user.name else message.from_user.first_name
-        safe_name = html.escape(db_name)
-        
         await message.answer(
-            f"👋 С возвращением, <b>{safe_name}</b>!\n"
-            f"Готов продолжить тренировки? 👇",
+            f"👋 С возвращением, <b>{user.name}</b>!\nГотов к тренировке?", 
             reply_markup=get_main_menu(),
-            parse_mode=ParseMode.HTML
+            parse_mode="HTML"
         )
     else:
-        await start_registration(message, state)
+        # Автоматическое имя
+        first_name = message.from_user.first_name
+        await message.answer(
+            f"👋 <b>Привет, {first_name}! Я TrAIner.</b>\n\n"
+            "Я помогу тебе составить программу тренировок и питания.\n"
+            "Давай настроим профиль. <b>Твой пол?</b>",
+            reply_markup=get_gender_keyboard(),
+            parse_mode="HTML"
+        )
+        await state.set_state(Registration.gender)
 
-# --- 2. ЛОГИКА РЕГИСТРАЦИИ ---
-
-async def start_registration(message: Message, state: FSMContext):
-    await message.answer(
-        "🏋️‍♂️ <b>Добро пожаловать в TrAIner!</b>\n\n"
-        "Я - ваш персональный AI-тренер. Сначала создадим ваш профиль.\n\n"
-        "Выберите ваш пол:",
-        reply_markup=get_gender_keyboard(),
-        parse_mode=ParseMode.HTML
-    )
-    await state.set_state(UserForm.gender)
-
-@router.message(UserForm.gender)
+# 1. ПОЛ -> ВОЗРАСТ
+@router.message(Registration.gender)
 async def process_gender(message: Message, state: FSMContext):
-    if message.text not in ["👨 Мужской", "👩 Женский"]:
-        await message.answer("Пожалуйста, выберите пол кнопкой ниже.")
-        return
-    gender_code = "male" if "Мужской" in message.text else "female"
-    await state.update_data(gender=gender_code)
+    gender = "male" if "Мужской" in message.text else "female"
+    await state.update_data(gender=gender)
     
-    await message.answer("Отлично! Сколько вам лет?", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(UserForm.age)
+    await message.answer("Сколько тебе лет?", reply_markup=None)
+    await state.set_state(Registration.age)
 
-@router.message(UserForm.age)
+# 2. ВОЗРАСТ -> ВЕС
+@router.message(Registration.age)
 async def process_age(message: Message, state: FSMContext):
     if not message.text.isdigit():
-        await message.answer("Пожалуйста, введите возраст числом (например: 25).")
+        await message.answer("Пожалуйста, введи число.")
         return
-    age = int(message.text)
-    if not (10 <= age <= 100):
-        await message.answer("Введите реальный возраст (от 10 до 100).")
-        return
-    await state.update_data(age=age)
-    await message.answer("Ваш вес (в кг)?")
-    await state.set_state(UserForm.weight)
+    
+    await state.update_data(age=int(message.text))
+    await message.answer("Введи свой вес (кг):")
+    await state.set_state(Registration.weight)
 
-@router.message(UserForm.weight)
+# 3. ВЕС -> РОСТ
+@router.message(Registration.weight)
 async def process_weight(message: Message, state: FSMContext):
     try:
-        text = message.text.replace(',', '.')
-        weight = float(text)
-        if not (30 <= weight <= 250): raise ValueError
-        await state.update_data(weight=weight)
-        await message.answer("Ваш рост (в см)?")
-        await state.set_state(UserForm.height)
+        w = float(message.text.replace(',', '.'))
+        await state.update_data(weight=w)
+        await message.answer("Введи свой рост (см):")
+        await state.set_state(Registration.height)
     except ValueError:
-        await message.answer("Пожалуйста, введите корректный вес (например: 75.5).")
+        await message.answer("Введи число (например 75.5)")
 
-@router.message(UserForm.height)
+# 4. РОСТ -> ЦЕЛЬ
+@router.message(Registration.height)
 async def process_height(message: Message, state: FSMContext):
     try:
-        val = float(message.text.replace(',', '.'))
-        if not (100 <= val <= 250):
-            await message.answer("Введите реальный рост (в см).")
-            return
-        await state.update_data(height=val)
-        await message.answer("Какой у вас уровень активности?", reply_markup=get_activity_keyboard())
-        await state.set_state(UserForm.activity_level)
+        h = float(message.text.replace(',', '.'))
+        await state.update_data(height=h)
+        
+        await message.answer("Твоя цель?", reply_markup=get_goal_keyboard())
+        await state.set_state(Registration.goal)
     except ValueError:
-        await message.answer("Введите рост числом.")
+        await message.answer("Введи число.")
 
-@router.message(UserForm.activity_level)
-async def process_activity(message: Message, state: FSMContext):
-    activity_map = {
-        "Сидячий (без спорта)": "sedentary", 
-        "Малая (1-3 тренировки)": "light",
-        "Средняя (3-5 тренировок)": "moderate", 
-        "Высокая (6-7 тренировок)": "high",
-        "Экстремальная (физ. труд)": "extreme"
-    }
-    selected_code = None
-    for key, value in activity_map.items():
-        if key in message.text:
-            selected_code = value
-            break
-    if not selected_code:
-        await message.answer("Выберите вариант из меню.")
-        return
-    await state.update_data(activity_level=selected_code)
-    await message.answer("Ваша главная цель?", reply_markup=get_goal_keyboard())
-    await state.set_state(UserForm.goal)
-
-@router.message(UserForm.goal)
+# 5. ЦЕЛЬ -> УРОВЕНЬ
+@router.message(Registration.goal)
 async def process_goal(message: Message, state: FSMContext):
-    goal_map = {
-        "📉 Похудение": "weight_loss", 
-        "⚖️ Поддержание": "maintenance", 
-        "💪 Набор массы": "muscle_gain"
+    goals = {"📉 Похудение": "weight_loss", "⚖️ Поддержание": "maintenance", "💪 Набор массы": "muscle_gain"}
+    selected = goals.get(message.text, "maintenance")
+    
+    # Сохраняем и код для базы, и текст для красивого вывода
+    await state.update_data(goal=selected, goal_text=message.text)
+    
+    await message.answer("Уровень подготовки?", reply_markup=get_workout_level_keyboard())
+    await state.set_state(Registration.workout_level)
+
+# 6. УРОВЕНЬ -> АКТИВНОСТЬ
+@router.message(Registration.workout_level)
+async def process_level(message: Message, state: FSMContext):
+    levels = {"👶 Новичок": "beginner", "👨‍🎓 Любитель": "intermediate", "🏆 ПРО": "advanced"}
+    selected = levels.get(message.text, "beginner")
+    await state.update_data(workout_level=selected)
+    
+    await message.answer("Уровень активности?", reply_markup=get_activity_keyboard())
+    await state.set_state(Registration.activity_level)
+
+# 7. АКТИВНОСТЬ -> ДНИ
+@router.message(Registration.activity_level)
+async def process_activity(message: Message, state: FSMContext):
+    acts = {
+        "🪑 Сидячий": "sedentary", "🚶 Малая": "light", 
+        "🏃 Средняя": "moderate", "🏋️ Высокая": "high", "🔥 Экстремальная": "extreme"
     }
-    goal_code = goal_map.get(message.text)
-    if not goal_code: 
-        await message.answer("Пожалуйста, выберите цель кнопкой.")
-        return
-    await state.update_data(goal=goal_code)
-    await message.answer("Ваш опыт тренировок?", reply_markup=get_workout_level_keyboard())
-    await state.set_state(UserForm.workout_level)
-
-@router.message(UserForm.workout_level)
-async def process_workout_level(message: Message, state: FSMContext):
-    level_code = "beginner"
-    if "Любитель" in message.text: level_code = "intermediate"
-    elif "Продвинутый" in message.text: level_code = "advanced"
-    elif "Новичок" in message.text: level_code = "beginner"
-    else: 
-        await message.answer("Выберите уровень кнопкой.")
-        return
-    await state.update_data(workout_level=level_code)
-    await message.answer("Сколько дней в неделю готовы тренироваться?", reply_markup=get_workout_days_keyboard())
-    await state.set_state(UserForm.workout_days)
-
-@router.message(UserForm.workout_days)
-async def process_workout_days(message: Message, state: FSMContext, session: AsyncSession):
-    text = message.text
-    days = 3
-    if text.isdigit():
-        days = int(text)
-    else:
-        match = re.search(r'\d+', text)
-        if match: 
-            days = int(match.group())
-    if days < 1: days = 1
-    if days > 7: days = 7
+    selected = acts.get(message.text, "sedentary")
+    await state.update_data(activity_level=selected)
     
-    await state.update_data(workout_days=days)
+    await message.answer("Сколько дней в неделю готов тренироваться?", reply_markup=get_workout_days_keyboard())
+    await state.set_state(Registration.workout_days)
+
+# 8. ДНИ -> ФИНАЛ
+@router.message(Registration.workout_days)
+async def process_days(message: Message, state: FSMContext, session: AsyncSession):
+    try:
+        days = int(re.search(r'\d+', message.text).group())
+    except:
+        days = 3
     
-    # --- СОХРАНЯЕМ В БД ---
     data = await state.get_data()
-    telegram_id = message.from_user.id
-    first_name = message.from_user.first_name
     
-    result = await session.execute(select(User).filter_by(telegram_id=telegram_id))
-    user = result.scalar_one_or_none()
+    # Создаем пользователя
+    await UserCRUD.add_user(
+        session,
+        telegram_id=message.from_user.id,
+        name=message.from_user.first_name,
+        age=data['age'],
+        weight=data['weight'],
+        height=data['height'],
+        gender=data['gender'],
+        goal=data['goal'],
+        workout_level=data['workout_level'],
+        activity_level=data['activity_level'],
+        workout_days=days
+    )
     
-    if not user:
-        user = User(telegram_id=telegram_id)
-        session.add(user)
-    
-    user.name = first_name
-    user.gender = data.get('gender')
-    user.age = data.get('age')
-    user.weight = data.get('weight')
-    user.height = data.get('height')
-    user.activity_level = data.get('activity_level')
-    user.goal = data.get('goal')
-    user.workout_level = data.get('workout_level')
-    user.workout_days = data.get('workout_days')
-    
+    # Добавляем историю веса
+    session.add(WeightHistory(user_id=message.from_user.id, weight=data['weight']))
     await session.commit()
+    
+    # Получаем красивое название цели (если нет в data, берем дефолт)
+    goals_map_rev = {"weight_loss": "📉 Похудение", "maintenance": "⚖️ Поддержание", "muscle_gain": "💪 Набор массы"}
+    goal_label = data.get('goal_text', goals_map_rev.get(data['goal'], "Форма"))
+
     await state.clear()
     
-    safe_name = html.escape(first_name)
-    
-    summary = (
+    # 🔥 ВОЗВРАЩАЕМ ИНФОРМАТИВНОЕ СООБЩЕНИЕ
+    await message.answer(
         f"✅ <b>Профиль успешно создан!</b>\n\n"
-        f"👤 Имя: {safe_name}\n"
-        f"📊 Вес: {data.get('weight')} кг\n"
-        f"🎯 Цель: {message.text}\n\n"
-        f"Теперь я могу составлять для тебя программы тренировок и питания! Жми кнопки в меню 👇"
+        f"👤 <b>Имя:</b> {message.from_user.first_name}\n"
+        f"📊 <b>Вес:</b> {data['weight']} кг\n"
+        f"🎯 <b>Цель:</b> {goal_label}\n"
+        f"📅 <b>Режим:</b> {days} дн/нед\n\n"
+        "Теперь я могу составлять для тебя программы тренировок и питания! Жми кнопки в меню 👇",
+        reply_markup=get_main_menu(),
+        parse_mode="HTML"
     )
-    await message.answer(summary, reply_markup=get_main_menu(), parse_mode=ParseMode.HTML)

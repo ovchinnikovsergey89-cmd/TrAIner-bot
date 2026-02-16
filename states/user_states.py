@@ -1,6 +1,7 @@
 from aiogram.fsm.state import State, StatesGroup
 
-class UserForm(StatesGroup):
+# Бывший UserForm, теперь Registration, чтобы совпадать с handlers/start.py
+class Registration(StatesGroup):
     name = State()
     gender = State()
     age = State()
@@ -10,7 +11,6 @@ class UserForm(StatesGroup):
     goal = State()
     workout_level = State()
     workout_days = State()
-    # trainer_style удален
     
 class EditForm(StatesGroup):
     weight = State()
