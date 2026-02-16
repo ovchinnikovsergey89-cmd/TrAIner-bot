@@ -16,13 +16,15 @@ class User(Base):
     workout_level = Column(String, nullable=True)
     workout_days = Column(Integer, default=3)
     
+    # 🔥 НОВОЕ: Час уведомления (по умолчанию 8:00)
+    notification_time = Column(Integer, default=8)
+    
     current_workout_program = Column(String, nullable=True)
     current_nutrition_program = Column(String, nullable=True)
     
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
-    # Связь с историей
     weight_history = relationship("WeightHistory", back_populates="user", cascade="all, delete-orphan")
 
 class WeightHistory(Base):

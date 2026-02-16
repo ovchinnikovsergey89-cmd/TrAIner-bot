@@ -45,8 +45,8 @@ def get_gender_keyboard() -> ReplyKeyboardMarkup:
 
 def get_activity_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
-    builder.add(KeyboardButton(text="🪑Сидячий (без спорта)"))
-    builder.add(KeyboardButton(text="👶Малая (1-3 тренировки)"))
+    builder.add(KeyboardButton(text="🪑Сидячая (нет тренировок)"))
+    builder.add(KeyboardButton(text="🚶Малая (1-3 тренировки)"))
     builder.add(KeyboardButton(text="🏃Средняя (3-5 тренировок)"))
     builder.add(KeyboardButton(text="🏋️‍♂️Высокая (6-7 тренировок)"))
     builder.add(KeyboardButton(text="🔥Экстремальная (физ. труд)"))
@@ -56,7 +56,7 @@ def get_activity_keyboard() -> ReplyKeyboardMarkup:
 def get_goal_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     builder.row(KeyboardButton(text="📉 Похудение"), KeyboardButton(text="⚖️ Поддержание"))
-    builder.row(KeyboardButton(text="💪 Набор массы"), KeyboardButton(text="🔄 Рекомпозиция"))
+    builder.row(KeyboardButton(text="💪 Набор массы"), KeyboardButton(text="🔄 Рекомпозиция")) # Добавлено
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
 def get_workout_level_keyboard() -> ReplyKeyboardMarkup:
@@ -72,9 +72,3 @@ def get_workout_days_keyboard() -> ReplyKeyboardMarkup:
         builder.add(KeyboardButton(text=f"{i} {day_text}"))
     builder.adjust(3)
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
-
-def get_profile_keyboard() -> ReplyKeyboardMarkup:
-    builder = ReplyKeyboardBuilder()
-    # builder.row(KeyboardButton(text="🔄 Изменить данные"))
-    builder.row(KeyboardButton(text="🔙 В главное меню"))
-    return builder.as_markup(resize_keyboard=True)

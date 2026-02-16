@@ -57,6 +57,16 @@ class UserCRUD:
     async def get_all_users(session: AsyncSession):
         result = await session.execute(select(User))
         return result.scalars().all()
+    
+    @staticmethod
+    async def get_users_by_notification_hour(session: AsyncSession, hour: int):
+        result = await session.execute(select(User).where(User.notification_time == hour))
+        return result.scalars().all()
+
+    @staticmethod
+    async def get_stats(session: AsyncSession):
+        total = await session.scalar(select(func.count(User.telegram_id)))
+        return {"total": total or 0}
 
     @staticmethod
     async def get_stats(session: AsyncSession):

@@ -8,8 +8,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import Config
 from database.database import init_db, async_session
-# 👇 Порядок импортов не важен, важен порядок в include_routers
-from handlers import start, help, profile, workout, nutrition, ai_workout, ai_chat, analysis, admin, edit, common
+
+# 👇 Убрали edit, так как он теперь часть profile.py
+# Добавили common и nutrition
+from handlers import start, help, profile, workout, nutrition, ai_workout, ai_chat, analysis, admin, common
 from middlewares.db_middleware import DbSessionMiddleware
 from services.scheduler import send_morning_motivation
 
@@ -49,31 +51,31 @@ async def main():
 
     dp.update.middleware(DbSessionMiddleware(session_pool=async_session))
 
+    # --- НАСТРОЙКА ПЛАНИРОВЩИКА ---
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+    
+    # 🔥 ВАЖНО: Запускаем job каждый час (в 00 минут), чтобы проверять notification_time
     scheduler.add_job(
         send_morning_motivation, 
         trigger='cron', 
-        hour=8, 
-        minute=0, 
+        minute=0, # Каждые 00 минут каждого часа (0:00, 1:00 ... 23:00)
         kwargs={'bot': bot, 'session_pool': async_session}
     )
     scheduler.start()
-    logger.info("⏰ Планировщик запущен (08:00 MSK)")
+    logger.info("⏰ Планировщик запущен (Проверка каждый час)")
 
-    # 👇 ИЗМЕНЕН ПОРЯДОК РОУТЕРОВ
-    # analysis.router поднят НАВЕРХ, чтобы перехватывать ввод веса
+    # --- ПОРЯДОК РОУТЕРОВ (ВАЖЕН!) ---
     dp.include_routers(
-        admin.router,
-        common.router,  
-        analysis.router, # <--- ПЕРЕНЕСЛИ СЮДА (теперь он приоритетнее профиля)
-        start.router,
-        profile.router,
-        workout.router,
-        ai_workout.router,
-        nutrition.router,
-        ai_chat.router,
-        edit.router,
-        help.router
+        admin.router,     # Админка (всегда первая)
+        common.router,    # Общие команды (/cancel, Техника)
+        analysis.router,  # Анализ веса (чтобы перехватывать числа)
+        nutrition.router, # Питание
+        start.router,     # Регистрация
+        profile.router,   # Профиль и настройки
+        workout.router,   # Тренировки (старые)
+        ai_workout.router,# AI Тренировки
+        ai_chat.router,   # Чат с тренером
+        help.router       # Помощь (в конце)
     )
 
     await on_startup(bot)

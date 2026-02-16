@@ -4,9 +4,9 @@ from .builders import (
     get_activity_keyboard,
     get_goal_keyboard,
     get_workout_level_keyboard,
-    get_workout_days_keyboard,
-    get_profile_keyboard
+    get_workout_days_keyboard
 )
+from .pagination import get_pagination_kb
 
 __all__ = [
     "get_main_menu",

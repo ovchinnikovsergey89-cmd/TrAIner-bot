@@ -90,10 +90,13 @@ async def process_height(message: Message, state: FSMContext):
 # 5. ЦЕЛЬ -> УРОВЕНЬ
 @router.message(Registration.goal)
 async def process_goal(message: Message, state: FSMContext):
-    goals = {"📉 Похудение": "weight_loss", "⚖️ Поддержание": "maintenance", "💪 Набор массы": "muscle_gain"}
+    goals = {
+        "📉 Похудение": "weight_loss", 
+        "⚖️ Поддержание": "maintenance", 
+        "💪 Набор массы": "muscle_gain",
+        "🔄 Рекомпозиция": "recomposition" # Добавлено
+    }
     selected = goals.get(message.text, "maintenance")
-    
-    # Сохраняем и код для базы, и текст для красивого вывода
     await state.update_data(goal=selected, goal_text=message.text)
     
     await message.answer("Уровень подготовки?", reply_markup=get_workout_level_keyboard())
@@ -102,7 +105,7 @@ async def process_goal(message: Message, state: FSMContext):
 # 6. УРОВЕНЬ -> АКТИВНОСТЬ
 @router.message(Registration.workout_level)
 async def process_level(message: Message, state: FSMContext):
-    levels = {"👶 Новичок": "beginner", "👨‍🎓 Любитель": "intermediate", "🏆 ПРО": "advanced"}
+    levels = {"🐣 Новичок": "beginner", "🏃 Любитель": "intermediate", "🏋️‍♂️ Продвинутый": "advanced"}
     selected = levels.get(message.text, "beginner")
     await state.update_data(workout_level=selected)
     
@@ -112,13 +115,14 @@ async def process_level(message: Message, state: FSMContext):
 # 7. АКТИВНОСТЬ -> ДНИ
 @router.message(Registration.activity_level)
 async def process_activity(message: Message, state: FSMContext):
-    acts = {
-        "🪑 Сидячий": "sedentary", "🚶 Малая": "light", 
-        "🏃 Средняя": "moderate", "🏋️ Высокая": "high", "🔥 Экстремальная": "extreme"
-    }
-    selected = acts.get(message.text, "sedentary")
-    await state.update_data(activity_level=selected)
+    # Упрощенный маппинг активности для базы
+    val = "moderate"
+    if "Сидячая" in message.text: val = "sedentary"
+    elif "Малая" in message.text: val = "light"
+    elif "Высокая" in message.text: val = "high"
+    elif "Экстремальная" in message.text: val = "extreme"
     
+    await state.update_data(activity_level=val)
     await message.answer("Сколько дней в неделю готов тренироваться?", reply_markup=get_workout_days_keyboard())
     await state.set_state(Registration.workout_days)
 
@@ -151,8 +155,13 @@ async def process_days(message: Message, state: FSMContext, session: AsyncSessio
     session.add(WeightHistory(user_id=message.from_user.id, weight=data['weight']))
     await session.commit()
     
-    # Получаем красивое название цели (если нет в data, берем дефолт)
-    goals_map_rev = {"weight_loss": "📉 Похудение", "maintenance": "⚖️ Поддержание", "muscle_gain": "💪 Набор массы"}
+    # Получаем красивое название цели
+    goals_map_rev = {
+        "weight_loss": "📉 Похудение", 
+        "maintenance": "⚖️ Поддержание", 
+        "muscle_gain": "💪 Набор массы",
+        "recomposition": "🔄 Рекомпозиция"
+    }
     goal_label = data.get('goal_text', goals_map_rev.get(data['goal'], "Форма"))
 
     await state.clear()

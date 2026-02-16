@@ -22,7 +22,12 @@ router = Router()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ДАННЫЕ ---
 GENDER_MAP = {"male": "👨 Мужской", "female": "👩 Женский"}
-GOAL_MAP = {"weight_loss": "📉 Похудение", "maintenance": "⚖️ Поддержание", "muscle_gain": "💪 Набор массы"}
+GOAL_MAP = {
+    "weight_loss": "📉 Похудение", 
+    "maintenance": "⚖️ Поддержание", 
+    "muscle_gain": "💪 Набор массы",
+    "recomposition": "🔄 Рекомпозиция"
+}
 LEVEL_MAP = {"beginner": "👶 Новичок", "intermediate": "👨‍🎓 Любитель", "advanced": "🏆 ПРО"}
 ACTIVITY_MAP = {
     "sedentary": "🪑 Сидячий", "light": "🚶 Малая", 
@@ -36,11 +41,14 @@ def get_profile_text(user):
     txt_height = f"{user.height} см" if user.height else "-"
     txt_weight = f"{user.weight} кг" if user.weight else "-"
     txt_gender = GENDER_MAP.get(user.gender, "-")
-    txt_goal = GOAL_MAP.get(user.goal, "-")
+    txt_goal = GOAL_MAP.get(user.goal, user.goal)
     txt_level = LEVEL_MAP.get(user.workout_level, "-")
     act_val = user.activity_level
     txt_activity = ACTIVITY_MAP.get(act_val, act_val) if act_val else "-"
     txt_days = f"{user.workout_days} дн/нед" if user.workout_days else "-"
+    
+    # 🔥 НОВОЕ: Отображение времени
+    txt_time = f"{user.notification_time}:00" if user.notification_time is not None else "Откл"
 
     return (
         f"👤 <b>Профиль: {txt_name}</b>\n"
@@ -51,7 +59,8 @@ def get_profile_text(user):
         f"🏃 <b>Активность:</b> {txt_activity}\n"
         f"🎯 <b>Цель:</b> {txt_goal}\n"
         f"💪 <b>Уровень:</b> {txt_level}\n"
-        f"📅 <b>Режим:</b> {txt_days}"
+        f"📅 <b>Режим:</b> {txt_days}\n"
+        f"⏰ <b>Уведомления:</b> {txt_time}"
     )
 
 # --- 1. ПРОСМОТР ПРОФИЛЯ ---
@@ -68,6 +77,8 @@ async def show_profile_view(message: Message, session: AsyncSession, state: FSMC
     
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
+    # 🔥 НОВОЕ: Кнопка настройки времени
+    kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
     
     await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
@@ -122,6 +133,7 @@ async def close_edit(callback: CallbackQuery, session: AsyncSession):
     
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
+    kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
     
     await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
@@ -245,3 +257,38 @@ async def save_gender(message: Message, session: AsyncSession, state: FSMContext
     await UserCRUD.update_user(session, message.from_user.id, gender=code)
     await message.answer("✅ Пол обновлен.", reply_markup=get_main_menu())
     await return_to_edit(message, session, state)
+
+# --- 4. НОВЫЕ ФУНКЦИИ: НАСТРОЙКА ВРЕМЕНИ ---
+
+@router.callback_query(F.data == "change_notif_time")
+async def ask_notif_time(callback: CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    # Кнопки с 06:00 до 23:00
+    hours = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    for h in hours:
+        builder.add(InlineKeyboardButton(text=f"{h}:00", callback_data=f"set_time_{h}"))
+    builder.adjust(4) # По 4 в ряд
+    
+    await callback.message.edit_text(
+        "⏰ <b>Выберите время для ежедневной мотивации:</b>\n(По Московскому времени)", 
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data.startswith("set_time_"))
+async def save_notif_time(callback: CallbackQuery, session: AsyncSession):
+    hour = int(callback.data.split("_")[-1])
+    
+    await UserCRUD.update_user(session, callback.from_user.id, notification_time=hour)
+    
+    await callback.answer(f"Время установлено: {hour}:00")
+    
+    # Возвращаемся в профиль
+    user = await UserCRUD.get_user(session, callback.from_user.id)
+    text = get_profile_text(user)
+    
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
+    kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
+    
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
