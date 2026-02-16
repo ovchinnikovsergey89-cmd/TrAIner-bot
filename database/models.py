@@ -1,4 +1,5 @@
-from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func
+from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func, ForeignKey
+from sqlalchemy.orm import relationship
 from database.database import Base 
 
 class User(Base):
@@ -18,7 +19,18 @@ class User(Base):
     current_workout_program = Column(String, nullable=True)
     current_nutrition_program = Column(String, nullable=True)
     
-    # trainer_style удален
-    
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Связь с историей
+    weight_history = relationship("WeightHistory", back_populates="user", cascade="all, delete-orphan")
+
+class WeightHistory(Base):
+    __tablename__ = 'weight_history'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey('users.telegram_id'))
+    weight = Column(Float, nullable=False)
+    date = Column(DateTime, default=func.now())
+    
+    user = relationship("User", back_populates="weight_history")

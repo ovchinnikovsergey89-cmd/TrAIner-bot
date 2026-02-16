@@ -1,6 +1,6 @@
 import os
 
-db_file = "trainer.db"
+db_file = "datebase.db"
 
 if os.path.exists(db_file):
     try:

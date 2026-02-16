@@ -4,15 +4,15 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from apscheduler.schedulers.asyncio import AsyncIOScheduler # Добавили планировщик
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import Config
 from database.database import init_db, async_session
-from handlers import start, help, profile, workout, nutrition, ai_workout, ai_chat, analysis, admin, edit
+# 👇 Добавили common в импорт
+from handlers import start, help, profile, workout, nutrition, ai_workout, ai_chat, analysis, admin, edit, common
 from middlewares.db_middleware import DbSessionMiddleware
-from services.scheduler import send_morning_motivation # Импортируем нашу функцию
+from services.scheduler import send_morning_motivation
 
-# Логирование
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -24,8 +24,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def on_startup(bot: Bot):
-    """Действия при запуске бота"""
-    # Если в config.py есть ADMIN_IDS, уведомим их
     if Config.ADMIN_IDS:
         try:
             for admin_id in Config.ADMIN_IDS:
@@ -36,7 +34,6 @@ async def on_startup(bot: Bot):
 async def main():
     logger.info("🚀 Запуск бота TrAIner...")
 
-    # 1. Инициализация БД
     try:
         await init_db()
         logger.info("✅ База данных подключена")
@@ -44,20 +41,15 @@ async def main():
         logger.critical(f"❌ Ошибка подключения к БД: {e}")
         return
 
-    # 2. Настройка бота
     bot = Bot(
         token=Config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     dp = Dispatcher()
 
-    # 3. Подключаем миддлвари
     dp.update.middleware(DbSessionMiddleware(session_pool=async_session))
 
-    # 4. Настройка Планировщика (Scheduler)
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    
-    # Задача: Каждое утро в 08:00
     scheduler.add_job(
         send_morning_motivation, 
         trigger='cron', 
@@ -68,9 +60,10 @@ async def main():
     scheduler.start()
     logger.info("⏰ Планировщик запущен (08:00 MSK)")
 
-    # 5. Регистрация роутеров
+    # 👇 Добавили common.router в список
     dp.include_routers(
         admin.router,
+        common.router,  # <--- ВОТ ОН (обработка /cancel и видео)
         start.router,
         profile.router,
         workout.router,
@@ -82,7 +75,6 @@ async def main():
         help.router
     )
 
-    # 6. Запуск
     await on_startup(bot)
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("🤖 Бот начал прослушивание...")

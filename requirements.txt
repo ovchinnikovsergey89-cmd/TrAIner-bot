@@ -60,3 +60,4 @@ tzlocal==5.3.1
 uritemplate==4.2.0
 urllib3==2.6.1
 yarl==1.22.0
+matplotlib==3.8.2

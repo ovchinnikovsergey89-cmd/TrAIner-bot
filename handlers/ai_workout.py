@@ -1,16 +1,15 @@
 import re
 import json
-from aiogram import Router, F, types
+from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Union
 
 from database.crud import UserCRUD
-from services.groq_service import GroqService 
+from services.ai_manager import AIManager  # <--- НОВЫЙ ИМПОРТ
 from states.workout_states import WorkoutPagination
 from keyboards.pagination import get_pagination_kb
 
@@ -18,7 +17,7 @@ router = Router()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def clean_text(text: str) -> str:
-    """Чистильщик текста"""
+    """Чистильщик текста (локальная доработка форматирования)"""
     if not text: return ""
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'\*(.*?)\*', r'<b>\1</b>', text)
@@ -32,11 +31,10 @@ def clean_text(text: str) -> str:
 
 async def show_workout_pages(message: Message, state: FSMContext, pages: list, from_db: bool = False):
     """Показывает первую страницу программы"""
-    # Сохраняем страницы в память бота (FSM) для листания
     await state.update_data(workout_pages=pages, current_page=0)
     await state.set_state(WorkoutPagination.active)
     
-    prefix = "💾 <b>Твоя сохраненная программа:</b>\n\n" if from_db else "🆕 <b>Программа от Тренера готова:</b>\n\n"
+    prefix = "💾 <b>Твоя сохраненная программа:</b>\n\n" if from_db else "🆕 <b>Новая программа готова:</b>\n\n"
     
     await message.answer(
         text=prefix + pages[0],
@@ -54,18 +52,16 @@ async def show_saved_program(message: Message, session: AsyncSession, state: FSM
         await message.answer("Сначала заполни профиль! (/start)")
         return
 
-    # Проверяем базу данных
     if user.current_workout_program:
         try:
-            # Превращаем JSON-строку обратно в список
             saved_pages = json.loads(user.current_workout_program)
             await show_workout_pages(message, state, saved_pages, from_db=True)
         except Exception as e:
-            await message.answer("⚠️ Ошибка загрузки программы. Попроси Тренера создать новую.")
+            await message.answer("⚠️ Ошибка загрузки программы. Попробуйте создать новую.")
     else:
         await message.answer(
             "📭 <b>У тебя пока нет программы.</b>\n"
-            "Нажми <b>🤖 AI Тренировка</b>, чтобы Тренер составил её.",
+            "Нажми <b>🤖 AI Тренировка</b>, чтобы создать её.",
             parse_mode=ParseMode.HTML
         )
 
@@ -80,19 +76,17 @@ async def request_ai_workout(message: Message, session: AsyncSession, state: FSM
         await message.answer("❌ Сначала заполните профиль (/start)!", parse_mode=ParseMode.HTML)
         return
 
-    # Если программа уже есть — спрашиваем подтверждение
     if user.current_workout_program:
         confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Да, создать новую", callback_data="confirm_new_workout")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_workout")]
         ])
         await message.answer(
-            "⚠️ <b>Внимание!</b>\nУ тебя уже есть сохраненная программа. Тренер перепишет её, если ты согласишься.\n\nПродолжить?",
+            "⚠️ <b>Внимание!</b>\nУ тебя уже есть сохраненная программа. Если создать новую, старая удалится.\n\nПродолжить?",
             reply_markup=confirm_kb,
             parse_mode=ParseMode.HTML
         )
     else:
-        # Если пусто — генерируем сразу
         await generate_workout_process(message, session, user, state)
 
 # --- ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ ---
@@ -109,16 +103,15 @@ async def cancel_generation(callback: CallbackQuery):
 
 # --- КНОПКА "🔄 Новая программа" (из пагинации) ---
 @router.callback_query(F.data == "regen_workout")
-@router.callback_query(F.data == "refresh_ai_workout") 
+@router.callback_query(F.data == "refresh_ai_workout")
 async def force_regen_workout(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    await callback.message.edit_text("🔄 Тренер удаляет старое и пишет новое...")
+    await callback.message.edit_text("🔄 Удаляю старую и создаю новую...")
     user = await UserCRUD.get_user(session, callback.from_user.id)
     await generate_workout_process(callback.message, session, user, state)
 
 # --- ЛОГИКА ГЕНЕРАЦИИ (Service) ---
 async def generate_workout_process(message: Message, session: AsyncSession, user, state: FSMContext):
-    # 🔥 ИЗМЕНЕНО: Теперь пишет Тренер
-    loading_msg = await message.answer("💪 <b>Тренер составляет план тренировок...</b>", parse_mode=ParseMode.HTML)
+    loading_msg = await message.answer("🗓 <b>AI составляет программу... (10-15 сек)</b>", parse_mode=ParseMode.HTML)
     
     try:
         user_data = {
@@ -127,14 +120,15 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
             "gender": user.gender,
             "weight": user.weight,
             "age": user.age,
-            "workout_level": user.workout_level,
+            "workout_level": user.workout_level
         }
         
-        ai_service = GroqService()
+        # --- ИСПОЛЬЗУЕМ НОВЫЙ МЕНЕДЖЕР ---
+        ai_service = AIManager()
         raw_pages = await ai_service.generate_workout_pages(user_data)
         
         if not raw_pages or (len(raw_pages) == 1 and "Ошибка" in raw_pages[0]):
-            await loading_msg.edit_text("❌ Тренер не смог составить программу. Попробуй позже.")
+            await loading_msg.edit_text("❌ Ошибка генерации. Попробуйте позже.")
             return
 
         cleaned_pages = [clean_text(p) for p in raw_pages]

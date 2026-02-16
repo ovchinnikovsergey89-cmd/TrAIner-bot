@@ -1,13 +1,16 @@
 import logging
 from aiogram import Router, F
-from aiogram.types import Message
+from aiogram.types import Message, BufferedInputFile
 from aiogram.enums import ParseMode, ChatAction
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from database.crud import UserCRUD
-from services.groq_service import GroqService
+from database.models import WeightHistory
+from services.ai_manager import AIManager
+from services.graph_service import GraphService # <--- Новый сервис
 from keyboards.builders import get_main_menu
 
 router = Router()
@@ -26,80 +29,73 @@ async def start_analysis(message: Message, state: FSMContext):
 
 @router.message(AnalysisState.waiting_for_weight)
 async def process_analysis(message: Message, state: FSMContext, session: AsyncSession):
-    # Показываем, что бот "печатает"
     await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
     try:
         text = message.text.replace(',', '.')
         new_weight = float(text)
     except ValueError:
-        await message.answer("⚠️ Пожалуйста, введите число (например: 80.5)")
+        await message.answer("⚠️ Введите число (например: 80.5)")
         return
 
     user = await UserCRUD.get_user(session, message.from_user.id)
     if not user:
-        await message.answer("Ошибка: Профиль не найден. Напишите /start")
+        await message.answer("Ошибка: Профиль не найден. /start")
         await state.clear()
         return
 
-    # Берем старый вес (если есть) или используем новый как старый
     old_weight = float(user.weight) if user.weight else new_weight
-    
-    # Считаем разницу
     delta = new_weight - old_weight
     
-    if delta < -0.1: 
-        trend = f"📉 <b>Минус {abs(delta):.1f} кг</b>"
-    elif delta > 0.1: 
-        trend = f"📈 <b>Плюс {abs(delta):.1f} кг</b>"
-    else: 
-        trend = "⚖️ <b>Вес без изменений</b>"
+    if delta < -0.1: trend = f"📉 <b>Минус {abs(delta):.1f} кг</b>"
+    elif delta > 0.1: trend = f"📈 <b>Плюс {abs(delta):.1f} кг</b>"
+    else: trend = "⚖️ <b>Вес без изменений</b>"
 
-    # Отправляем временное сообщение
-    temp_msg = await message.answer(f"{trend}\n⏱ <b>Тренер анализирует прогресс...</b>", parse_mode=ParseMode.HTML)
+    temp_msg = await message.answer(f"{trend}\n⏱ <b>Сохраняю и строю график...</b>", parse_mode=ParseMode.HTML)
 
-    # Запрашиваем анализ у ИИ
-    ai = GroqService()
+    # 1. Сохраняем в БД
     try:
-        # Передаем данные для анализа
-        feedback = await ai.analyze_progress({
-            "weight": old_weight, 
-            "goal": user.goal or "Поддержание формы"
-        }, new_weight)
-        
-        # Если ИИ вернул ошибку или пустоту, ставим заглушку
-        if not feedback or "Ошибка" in feedback:
-            feedback = "Данные обновлены. Продолжайте тренировки!"
-
-        # 🔥 Сначала обновляем базу!
+        session.add(WeightHistory(user_id=message.from_user.id, weight=new_weight))
         await UserCRUD.update_user(session, message.from_user.id, weight=new_weight)
-        
-        # Удаляем "думающее" сообщение
-        try:
-            await temp_msg.delete()
-        except:
-            pass
-        
-        # Формируем красивый ответ
-        result_text = (
-            f"📊 <b>Отчет о прогрессе:</b>\n"
-            f"Было: {old_weight} кг -> Стало: <b>{new_weight} кг</b>\n"
-            f"{trend}\n\n"
-            f"💬 <b>Комментарий Тренера:</b>\n"
-            f"{feedback}"
-        )
-        
-        await message.answer(
-            result_text,
-            reply_markup=get_main_menu(),
-            parse_mode=ParseMode.HTML
-        )
-        
     except Exception as e:
-        logger.error(f"Analysis critical error: {e}")
-        # Даже если всё упало, сохраняем вес и говорим юзеру ок
-        await UserCRUD.update_user(session, message.from_user.id, weight=new_weight)
-        await message.answer(f"✅ Вес {new_weight} кг сохранен!", reply_markup=get_main_menu())
-    
-    finally:
-        await state.clear()
+        logger.error(f"DB Error: {e}")
+
+    # 2. Получаем историю для графика
+    history_result = await session.execute(
+        select(WeightHistory).where(WeightHistory.user_id == message.from_user.id).order_by(WeightHistory.date)
+    )
+    history_data = history_result.scalars().all()
+
+    # 3. AI Анализ
+    ai = AIManager()
+    ai_feedback = await ai.analyze_progress({
+        "weight": old_weight, 
+        "goal": user.goal or "Поддержание"
+    }, new_weight)
+
+    # 4. Рисуем график
+    graph_bytes = None
+    if len(history_data) >= 2:
+        try:
+            graph_buf = await GraphService.create_weight_graph(history_data)
+            if graph_buf:
+                graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="chart.png")
+        except Exception as e:
+            logger.error(f"Graph Error: {e}")
+
+    # 5. Отправка результата
+    try: await temp_msg.delete()
+    except: pass
+
+    result_text = (
+        f"📊 <b>Новый вес: {new_weight} кг</b>\n"
+        f"{trend}\n\n"
+        f"💬 <b>Совет тренера:</b>\n{ai_feedback}"
+    )
+
+    if graph_bytes:
+        await message.answer_photo(graph_bytes, caption=result_text, reply_markup=get_main_menu())
+    else:
+        await message.answer(result_text, reply_markup=get_main_menu())
+        
+    await state.clear()

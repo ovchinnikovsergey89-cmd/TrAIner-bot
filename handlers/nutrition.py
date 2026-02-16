@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aiogram.exceptions import TelegramBadRequest
 
 from database.crud import UserCRUD
-from services.groq_service import GroqService
+from services.ai_manager import AIManager # <--- НОВЫЙ ИМПОРТ
 from services.recipe_service import search_recipe_video
 from keyboards.pagination import get_pagination_kb
 from states.workout_states import WorkoutPagination
@@ -21,7 +21,7 @@ class RecipeState(StatesGroup):
     waiting_for_dish = State()
 
 def clean_text(text: str) -> str:
-    """Чистильщик текста"""
+    """Чистильщик текста для питания"""
     if not text: return ""
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
@@ -92,7 +92,6 @@ async def cancel_generation(callback: CallbackQuery):
     await callback.answer("Отменено")
 
 async def generate_nutrition_process(message: Message, session: AsyncSession, user, state: FSMContext):
-    # 🔥 ИЗМЕНЕНО: Пишет Тренер
     status_msg = await message.answer(f"🍏 <b>Тренер рассчитывает калории и подбирает продукты...</b>", parse_mode=ParseMode.HTML)
     
     try:
@@ -101,7 +100,8 @@ async def generate_nutrition_process(message: Message, session: AsyncSession, us
             "age": user.age, "activity_level": user.activity_level, "height": user.height,
         }
         
-        ai = GroqService()
+        # --- ИСПОЛЬЗУЕМ НОВЫЙ МЕНЕДЖЕР ---
+        ai = AIManager()
         raw_pages = await ai.generate_nutrition_pages(user_data)
         
         cleaned_pages = [clean_text(p) for p in raw_pages if len(p) > 20]

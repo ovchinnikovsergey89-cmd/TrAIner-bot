@@ -5,7 +5,7 @@ from aiogram.enums import ParseMode
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.crud import UserCRUD
-from services.groq_service import GroqService
+from services.ai_manager import AIManager # <--- НОВЫЙ ИМПОРТ
 from states.chat_states import AIChatState
 from keyboards.builders import get_main_menu
 
@@ -19,7 +19,6 @@ def get_chat_kb():
 
 # --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def start_chat_logic(message: Message, state: FSMContext):
-    # Инициализируем пустую историю
     await state.update_data(chat_history=[]) 
     
     welcome_text = (
@@ -49,30 +48,26 @@ async def start_chat_callback(callback: CallbackQuery, state: FSMContext):
 # 3. ОБРАБОТКА СООБЩЕНИЙ В ЧАТЕ
 @router.message(AIChatState.chatting)
 async def process_chat_message(message: Message, state: FSMContext, session: AsyncSession):
-    # Выход из чата
     if message.text in ["🔙 Вернуться в меню", "стоп", "выход", "/start"]:
         await state.clear()
         await message.answer("Чат завершен.", reply_markup=get_main_menu())
         return
 
-    # Проверка профиля
     user = await UserCRUD.get_user(session, message.from_user.id)
     if not user:
         await message.answer("Заполни профиль!")
         return
 
-    # Индикация
     loading_msg = await message.answer("💬 <i>Тренер пишет сообщение...</i>", parse_mode=ParseMode.HTML)
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
-    # Сохраняем сообщение
     data = await state.get_data()
     history = data.get("chat_history", [])
     history.append({"role": "user", "content": message.text})
     
-    ai_service = GroqService()
+    # --- ИСПОЛЬЗУЕМ НОВЫЙ МЕНЕДЖЕР ---
+    ai_service = AIManager()
     
-    # 🔥 КОНТЕКСТ БЕЗ СТИЛЯ 🔥
     user_context = {
         "gender": user.gender,
         "weight": user.weight,
@@ -84,15 +79,12 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
     }
     
     try:
-        # Запрос к AI
         answer = await ai_service.get_chat_response(history, user_context)
     except Exception as e:
         answer = "Прости, связь с сервером прервалась."
 
-    # Сохраняем ответ
     history.append({"role": "assistant", "content": answer})
     await state.update_data(chat_history=history)
     
-    # Отправляем
     await loading_msg.delete()
     await message.answer(answer, parse_mode=ParseMode.HTML)

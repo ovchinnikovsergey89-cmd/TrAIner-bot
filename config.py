@@ -13,7 +13,7 @@ class Config:
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
     
     # База данных
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./trainer.db")
+    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./database.db")
 
     # --- 👇 СПИСОК АДМИНОВ 👇 ---
     # Впиши сюда свой ID (числом). Можно добавить несколько через запятую.
