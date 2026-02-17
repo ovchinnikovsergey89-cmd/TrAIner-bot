@@ -8,23 +8,34 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from keyboards.builders import get_main_menu
 from services.rutube_service import search_exercise_video
+from keyboards.main_menu import get_main_menu
 
 router = Router()
 
 class VideoState(StatesGroup):
     waiting_for_name = State()
 
-# --- ОТМЕНА ---
+# --- ОТМЕНА (Универсальная) ---
 @router.message(Command("cancel"))
+@router.message(F.text.casefold() == "отмена")
 async def cmd_cancel(message: Message, state: FSMContext):
     current_state = await state.get_state()
-    if current_state is None:
-        await message.answer("Нет активных действий.", reply_markup=get_main_menu())
-        return
+    
+    # Очищаем состояние (это выведет юзера из поиска видео или из пожеланий AI)
     await state.clear()
-    await message.answer("🚫 Отменено.", reply_markup=get_main_menu())
+    
+    if current_state is None:
+        await message.answer(
+            "Нет активных действий для отмены.", 
+            reply_markup=get_main_menu()
+        )
+    else:
+        await message.answer(
+            "🚫 Действие отменено. Возвращаюсь в меню.", 
+            reply_markup=get_main_menu()
+        )
 
-# --- ВХОД В ПОИСК (КНОПКА ИЛИ CALLBACK) ---
+# --- ВХОД В ПОИСК (Эту оставляем без изменений) ---
 async def start_search_logic(message: Message, state: FSMContext):
     await message.answer(
         "🎥 <b>Поиск упражнений (RuTube 🇷🇺)</b>\n\n"
