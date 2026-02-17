@@ -27,7 +27,9 @@ class AIManager:
                 )
             except Exception as e:
                 import logging
-                logging.error(f"AI Init Error: {e}")
+                logging.error(f"AI Generation Error: {e}")
+                # Возвращаем понятную ошибку вместо падения
+                return ["❌ <b>Сервер тренера перегружен.</b>\n\nПожалуйста, попробуй еще раз через минуту."]
 
     # --- 1. АНАЛИЗ ПРОГРЕССА ---
     # ВАЖНО: Добавлен аргумент workouts_count=0
@@ -60,7 +62,8 @@ class AIManager:
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model=self.model, temperature=0.7
+                model=self.model, temperature=0.7,
+                timeout=45.0
             )
             from utils.text_tools import clean_text
             return clean_text(r.choices[0].message.content)
@@ -118,7 +121,8 @@ class AIManager:
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": user_prompt}], 
-                model=self.model, temperature=0.3
+                model=self.model, temperature=0.3,
+                timeout=45.0
             )
             return self._smart_split(r.choices[0].message.content)
         except Exception:
@@ -152,7 +156,8 @@ class AIManager:
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}], 
-                model=self.model, temperature=0.4
+                model=self.model, temperature=0.4,
+                timeout=45.0
             )
             return self._smart_split(r.choices[0].message.content)
         except Exception:
@@ -191,7 +196,8 @@ class AIManager:
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "system", "content": system}] + history[-6:], 
-                model=self.model
+                model=self.model,
+                timeout=45.0
             )
             return clean_text(r.choices[0].message.content)
         except Exception: 
