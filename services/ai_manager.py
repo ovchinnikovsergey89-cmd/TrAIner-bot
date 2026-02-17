@@ -30,7 +30,20 @@ class AIManager:
                 logging.error(f"AI Generation Error: {e}")
                 # Возвращаем понятную ошибку вместо падения
                 return ["❌ <b>Сервер тренера перегружен.</b>\n\nПожалуйста, попробуй еще раз через минуту."]
-
+    # --- ТЕХНИЧЕСКИЙ МЕТОД: РАЗДЕЛЕНИЕ НА СТРАНИЦЫ ---
+    def _smart_split(self, text: str) -> list[str]:
+        # Очищаем текст общим чистильщиком
+        text = clean_text(text)
+        
+        # Разрезаем текст по нашему тегу
+        pages = text.split("===PAGE_BREAK===")
+        
+        # Убираем пустые куски и лишние пробелы
+        final_pages = [p.strip() for p in pages if len(p.strip()) > 20]
+        
+        # Если вдруг ИИ не прислал тег, возвращаем весь текст одной страницей
+        return final_pages if final_pages else [text]
+    
     # --- 1. АНАЛИЗ ПРОГРЕССА ---
     # ВАЖНО: Добавлен аргумент workouts_count=0
     async def analyze_progress(self, user_data: dict, current_weight: float, workouts_count: int = 0) -> str:
