@@ -1,5 +1,7 @@
 from aiogram.fsm.state import State, StatesGroup
 
 class WorkoutPagination(StatesGroup):
-    active = State() # Пользователь смотрит тренировку
-    
+    active = State() 
+
+class WorkoutRequest(StatesGroup):
+    waiting_for_wishes = State() # Новое состояние для пожеланий

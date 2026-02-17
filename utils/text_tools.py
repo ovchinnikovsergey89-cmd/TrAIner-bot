@@ -5,6 +5,8 @@ def clean_text(text: str) -> str:
     
     # Удаляем служебный мусор от DeepSeek
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    # 🔥 ДОБАВЬТЕ ЭТУ СТРОКУ: заменяем <br> на обычный перенос строки
+    text = text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
     text = re.sub(r'```html', '', text, flags=re.IGNORECASE)
     text = re.sub(r'```', '', text)
     

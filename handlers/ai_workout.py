@@ -3,7 +3,8 @@ import json
 import datetime
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
+from states.workout_states import WorkoutPagination, WorkoutRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
@@ -15,6 +16,7 @@ from services.ai_manager import AIManager  # <--- НОВЫЙ ИМПОРТ
 from states.workout_states import WorkoutPagination
 from keyboards.pagination import get_pagination_kb
 from database.models import WorkoutLog
+from aiogram.utils.keyboard import ReplyKeyboardBuilder # Для кнопки пропуска
 
 router = Router()
 
@@ -79,17 +81,19 @@ async def show_saved_program(message: Message, session: AsyncSession, state: FSM
         )
 
 # ==========================================
-# 2. КНОПКА "🤖 AI Тренировка" (Генерация)
+# 2. КНОПКА "🤖 AI Тренировка" (С проверкой существующей программы)
 # ==========================================
-@router.message(Command("ai_workout"))
 @router.message(F.text == "🤖 AI Тренировка")
+@router.message(Command("ai_workout"))
 async def request_ai_workout(message: Message, session: AsyncSession, state: FSMContext):
-    user = await UserCRUD.get_user(session, message.from_user.id)
+    user = await UserCRUD.get_user(session, message.from_user.id) #
     if not user or not user.workout_level:
-        await message.answer("❌ Сначала заполните профиль (/start)!", parse_mode=ParseMode.HTML)
+        await message.answer("❌ Сначала заполните профиль (/start)!") #
         return
 
+    # --- ПРОВЕРКА НАЛИЧИЯ ПРОГРАММЫ ---
     if user.current_workout_program:
+        # Создаем инлайн-клавиатуру для подтверждения
         confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Да, создать новую", callback_data="confirm_new_workout")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_workout")]
@@ -98,9 +102,58 @@ async def request_ai_workout(message: Message, session: AsyncSession, state: FSM
             "⚠️ <b>Внимание!</b>\nУ тебя уже есть сохраненная программа. Если создать новую, старая удалится.\n\nПродолжить?",
             reply_markup=confirm_kb,
             parse_mode=ParseMode.HTML
-        )
+        ) #
     else:
-        await generate_workout_process(message, session, user, state)
+        # Если программы нет — сразу спрашиваем пожелания
+        await start_wishes_step(message, state)
+
+# Вынесем отправку сообщения с пожеланиями в отдельную функцию для удобства
+async def start_wishes_step(message: Message, state: FSMContext):
+    kb = ReplyKeyboardBuilder()
+    kb.row(KeyboardButton(text="⏩ Пропустить и составить обычную"))
+    
+    text = (
+        "💪 <b>Хочешь добавить особые пожелания к программе?</b>\n\n"
+        "Напиши их текстом (например: <i>'упор на грудные'</i>) или нажми кнопку ниже 👇"
+    )
+    
+    await message.answer(
+        text=text,
+        reply_markup=kb.as_markup(resize_keyboard=True),
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(WorkoutRequest.waiting_for_wishes)
+
+# --- ИСПРАВЛЯЕМ ОБРАБОТЧИК ПОДТВЕРЖДЕНИЯ ---
+@router.callback_query(F.data == "confirm_new_workout")
+async def confirm_generation(callback: CallbackQuery, state: FSMContext):
+    await callback.message.delete()
+    # Теперь после нажатия "Да" переходим к сбору пожеланий
+    await start_wishes_step(callback.message, state)
+
+# 2. ЭТА ФУНКЦИЯ ДОЛЖНА ИДТИ СЛЕДУЮЩЕЙ — она ловит ваш текст
+@router.message(WorkoutRequest.waiting_for_wishes)
+async def process_workout_wishes(message: Message, session: AsyncSession, state: FSMContext):
+    user_text = message.text
+    
+    # Сразу очищаем состояние, чтобы бот вернулся в обычный режим
+    await state.clear() 
+    
+    if user_text == "⏩ Пропустить и составить обычную":
+        wishes = "Особых пожеланий нет."
+    else:
+        wishes = user_text
+
+    user = await UserCRUD.get_user(session, message.from_user.id)
+    
+    # Убираем кнопку пропуска, возвращая главное меню
+    from keyboards.main_menu import get_main_menu
+    await message.answer(f"✅ Принято: <i>\"{wishes}\"</i>\nСоставляю план...", 
+                         reply_markup=get_main_menu(), 
+                         parse_mode="HTML")
+    
+    # Запускаем саму генерацию
+    await generate_workout_process(message, session, user, state, wishes=wishes)
 
 # --- ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ ---
 @router.callback_query(F.data == "confirm_new_workout")
@@ -123,8 +176,8 @@ async def force_regen_workout(callback: CallbackQuery, session: AsyncSession, st
     await generate_workout_process(callback.message, session, user, state)
 
 # --- ЛОГИКА ГЕНЕРАЦИИ (Service) ---
-async def generate_workout_process(message: Message, session: AsyncSession, user, state: FSMContext):
-    loading_msg = await message.answer("🗓 <b>Тренер составляет программу... (20 сек)</b>", parse_mode=ParseMode.HTML)
+async def generate_workout_process(message: Message, session: AsyncSession, user, state: FSMContext, wishes: str = None):
+    loading_msg = await message.answer("🗓 <b>Тренер изучает пожелания и составляет программу...</b>", parse_mode=ParseMode.HTML)
     
     try:
         user_data = {
@@ -133,12 +186,15 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
             "gender": user.gender,
             "weight": user.weight,
             "age": user.age,
-            "workout_level": user.workout_level
+            "workout_level": user.workout_level,
+            "name": user.name,
+            "height": user.height,
+            "wishes": wishes  # 🔥 ПЕРЕДАЕМ ПОЖЕЛАНИЯ
         }
         
-        # --- ИСПОЛЬЗУЕМ НОВЫЙ МЕНЕДЖЕР ---
         ai_service = AIManager()
         raw_pages = await ai_service.generate_workout_pages(user_data)
+        # ... далее без изменений
         
         if not raw_pages or (len(raw_pages) == 1 and "Ошибка" in raw_pages[0]):
             await loading_msg.edit_text("❌ Ошибка генерации. Попробуйте позже.")
