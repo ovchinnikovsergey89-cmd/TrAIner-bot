@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 class AIManager:
     """
     Единый менеджер для работы с AI (DeepSeek).
+    Отвечает за генерацию тренировок, питания и анализ прогресса.
     """
     def __init__(self):
         self.api_key = Config.DEEPSEEK_API_KEY
@@ -29,170 +30,169 @@ class AIManager:
             logger.warning("⚠️ DEEPSEEK_API_KEY не найден в конфиге")
 
     def _smart_split(self, text: str) -> list[str]:
+        """Улучшенное деление текста на страницы по тегу ===PAGE_BREAK==="""
         text = clean_text(text)
         pages = text.split("===PAGE_BREAK===")
         return [p.strip() for p in pages if len(p.strip()) > 20]
 
     def _get_dates_list(self, days_count: int) -> list[str]:
+        """Формирует список дат для промта"""
         today = datetime.date.today()
-        dates = []
         months = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек']
         weekdays = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс']
-        current_date = today 
-        step = 1 if days_count > 3 else 2
-        
-        for _ in range(days_count):
-            d_str = f"{current_date.day} {months[current_date.month-1]} ({weekdays[current_date.weekday()]})"
-            dates.append(d_str)
-            current_date += timedelta(days=step)
+        dates = []
+        for i in range(days_count):
+            d = today + timedelta(days=i)
+            dates.append(f"{d.day} {months[d.month-1]} ({weekdays[d.weekday()]})")
         return dates
 
-    # --- 1. АНАЛИЗ ПРОГРЕССА ---
+    # --- 1. АНАЛИЗ ПРОГРЕССА (ДИЗАЙНЕРСКИЙ ВЫВОД) ---
     async def analyze_progress(self, user_data: dict, current_weight: float) -> str:
         if not self.client: return "Ошибка API: Ключ не настроен"
         
         old_weight = user_data.get('weight', current_weight)
-        goal = user_data.get('goal', 'Форма')
+        goal = user_data.get('goal', 'maintenance')
         diff = current_weight - old_weight
-
-        # Описание цели для AI
-        goal_desc = goal
-        if goal == 'recomposition':
-            goal_desc = "Рекомпозиция (сжигание жира при сохранении/росте мышц, вес может стоять)"
+        
+        goal_map = {
+            'recomposition': 'Рекомпозиция (сжигание жира + рост мышц)',
+            'muscle_gain': 'Набор массы',
+            'weight_loss': 'Похудение',
+            'maintenance': 'Поддержание формы'
+        }
+        goal_desc = goal_map.get(goal, 'Улучшение формы')
 
         prompt = f"""
-        Ты — опытный фитнес-тренер (не врач, не робот). Твой стиль: краткий, по делу, с мужской поддержкой.
-        
-        СИТУАЦИЯ:
-        Вес клиента изменился: {old_weight} кг -> {current_weight} кг.
-        Разница: {diff:.1f} кг.
-        Цель клиента: {goal_desc}.
+        Ты — элитный фитнес-коуч. Клиент обновил данные о весе.
+        ДАННЫЕ: {old_weight} кг -> {current_weight} кг (Разница: {diff:.1f} кг). 
+        Цель: {goal_desc}.
 
-        ТВОЯ ЗАДАЧА:
-        1. Оцени результат (хорошо/плохо/нормально).
-        2. Дай ОДИН конкретный совет.
+        ТВОЯ ЗАДАЧА: Дай краткий и ЧИТАБЕЛЬНЫЙ анализ. 
         
-        ЗАПРЕТЫ:
-        - Не отправляй к врачу, если нет угрозы жизни.
-        - Не пиши банальщину.
-        
-        Напиши 2-3 предложения. Используй теги <b> и <i>.
+        СТРОГИЙ ФОРМАТ ОТВЕТА (используй HTML):
+        1. Первая строка: Эмодзи + вердикт (например, ✅ <b>Отличная динамика!</b>).
+        2. Вторая строка: ОБЯЗАТЕЛЬНО ПУСТАЯ СТРОКА.
+        3. Третья строка: <b>Анализ:</b> (Одно емкое предложение о результате).
+        4. Четвертая строка: <b>Рекомендация:</b> (Один конкретный совет по питанию или режиму).
+
+        ЗАПРЕТЫ: не пиши вступлений, не делай текст сплошным полотном.
         """
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model=self.model, temperature=0.8
+                model=self.model, temperature=0.7
             )
             return clean_text(r.choices[0].message.content)
-        except Exception as e:
-            logger.error(f"Analysis error: {e}")
-            return "Тренер записал новый вес."
+        except Exception: 
+            return "📈 <b>Вес обновлен!</b>\n\nТренер зафиксировал данные в твоем профиле."
 
     # --- 2. ГЕНЕРАЦИЯ ТРЕНИРОВКИ ---
     async def generate_workout_pages(self, user_data: dict) -> list[str]:
-        if not self.client: return ["❌ Ошибка API: Ключ не настроен"]
+        if not self.client: return ["❌ Ошибка API"]
         
-        level = user_data.get('workout_level', 'Новичок')
-        days = user_data.get('workout_days', 3)
+        level = user_data.get('workout_level', 'beginner')
+        days_per_week = user_data.get('workout_days', 3)
         goal = user_data.get('goal', 'maintenance')
-        dates_str = ", ".join(self._get_dates_list(days))
-
-        system_prompt = "Ты — TrAIner. Пиши программу, используя HTML теги (b, i)."
-
-        user_prompt = f"""
-        СОСТАВЬ ПРОГРАММУ ({level}, Цель: {goal}, {days} дн).
-        ДАТЫ ТРЕНИРОВОК: {dates_str}
-
-        ФОРМАТ ДНЯ (Строго):
-        📅 <b>[Дата] — [Группа мышц]</b>
-        1. <b>[Упражнение]</b>
-        <i>[Подходы] x [Повторения]</i>
-        Техника: [Очень кратко]
-
-        Раздели дни строкой ===PAGE_BREAK===.
-        В конце добавь блок "Советы".
-        """
         
+        now = datetime.datetime.now()
+        weekdays_ru = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
+        today_name = weekdays_ru[now.weekday()]
+        today_date = now.strftime("%d.%m")
+        
+        user_prompt = f"""
+        СОСТАВЬ ИНДИВИДУАЛЬНУЮ ПРОГРАММУ.
+        Сегодня: {today_name}, {today_date}. Цель: {goal}. Уровень: {level}. График: {days_per_week} дн/нед.
+        
+        ЗАДАЧА: Распредели тренировки, НАЧИНАЯ С СЕГОДНЯ ({today_name} {today_date}). 
+        
+        СТРОГИЕ ПРАВИЛА ОФОРМЛЕНИЯ:
+        1. Название дня: 📅 <b>[День недели], [Дата] — [Тип тренировки]</b>.
+        2. Между упражнениями ОБЯЗАТЕЛЬНО ПУСТАЯ СТРОКА.
+        3. Формат упражнения:
+        <b>[Номер]. [Название]</b>
+        <i>[Сеты] х [Повторы] (Отдых [сек])</i>
+        Техника: [Короткий совет]
+        
+        Разделяй дни СТРОГО тегом: ===PAGE_BREAK===
+        """
         try:
             r = await self.client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ], model=self.model, temperature=0.3
+                messages=[{"role": "user", "content": user_prompt}], 
+                model=self.model, temperature=0.3
             )
             return self._smart_split(r.choices[0].message.content)
-        except Exception as e:
-            logger.error(f"Workout gen error: {e}")
-            return ["❌ Не удалось составить программу."]
+        except Exception:
+            return ["❌ Ошибка при составлении программы."]
 
-    # --- 3. ГЕНЕРАЦИЯ ПИТАНИЯ ---
+    # --- 3. ГЕНЕРАЦИЯ ПИТАНИЯ (3 ВАРИАНТА + ПЕРЕКУСЫ + СПИСОК) ---
     async def generate_nutrition_pages(self, user_data: dict) -> list[str]:
-        if not self.client: return ["❌ Ошибка API: Ключ не настроен"]
+        if not self.client: return ["❌ Ошибка API"]
         kcal = self._calculate_target_calories(user_data)
         goal = user_data.get('goal', 'maintenance')
         
         prompt = f"""
-        Составь рацион на ~{kcal} ккал для цели: {goal}.
-        ВАЖНО: НЕ ПИШИ ВСТУПЛЕНИЕ.
+        Ты — профессиональный диетолог. Составь подробный рацион питания на {kcal} ккал. 
+        Цель клиента: {goal}.
         
-        ФОРМАТ ВЫВОДА ДЛЯ КАЖДОГО БЛЮДА:
-        Вариант X: <b>[Блюдо]</b>
-        * [Состав кратко]
-        * <b>КБЖУ: ~[ккал] (Б:.., Ж:.., У:..)</b>
+        ТРЕБОВАНИЯ К КОНТЕНТУ:
+        1. Для КАЖДОГО блока (Завтрак, Обед, Ужин, Перекусы) предоставь ровно 3 РАЗНЫХ варианта на выбор.
+        2. Указывай точные ингредиенты в граммах и КБЖУ для каждого варианта.
+        3. В конце добавь расширенный список продуктов на неделю (Shopping List).
         
-        СТРУКТУРА МЕНЮ:
-        🍳 <b>ЗАВТРАК (3 варианта)</b>
-        ===PAGE_BREAK===
-        🍲 <b>ОБЕД (3 варианта)</b>
-        ===PAGE_BREAK===
-        🥗 <b>УЖИН (3 варианта)</b>
-        ===PAGE_BREAK===
-        🥪 <b>ПЕРЕКУСЫ (3 варианта)</b>
-        ===PAGE_BREAK===
-        🛒 <b>СПИСОК ПРОДУКТОВ</b>
+        СТРОГИЕ ПРАВИЛА ОФОРМЛЕНИЯ:
+        1. Между вариантами блюд (включая ПЕРЕКУСЫ) ОБЯЗАТЕЛЬНО делай ПУСТУЮ СТРОКУ для читабельности.
+        2. Используй HTML (<b>, <i>). Без вступлений.
+        3. Разделяй блоки (Завтрак, Обед, Ужин, Перекусы, Список покупок) СТРОГО тегом: ===PAGE_BREAK===
+        
+        ФОРМАТ ВАРИАНТА:
+        Вариант X: <b>[Название]</b>
+        * [Ингредиенты с весом]
+        * <b>КБЖУ: ~[ккал] (Б:..г, Ж:..г, У:..г)</b>
         """
-        
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}], 
                 model=self.model, temperature=0.4
             )
             return self._smart_split(r.choices[0].message.content)
-        except Exception as e:
-             logger.error(f"Nutrition gen error: {e}")
-             return ["Ошибка генерации."]
+        except Exception:
+            return ["❌ Ошибка генерации рациона."]
 
+    # --- 4. РАСЧЕТ КАЛОРИЙ ---
     def _calculate_target_calories(self, user_data: dict) -> int:
         try:
-            weight = float(user_data.get('weight', 70))
-            height = float(user_data.get('height', 170))
-            age = int(user_data.get('age', 30))
+            w = float(user_data.get('weight', 70))
+            h = float(user_data.get('height', 170))
+            a = int(user_data.get('age', 30))
+            gender = user_data.get('gender', 'male')
             goal = user_data.get('goal', 'maintenance')
-            
-            if user_data.get('gender') == 'male':
-                bmr = 10 * weight + 6.25 * height - 5 * age + 5
-            else:
-                bmr = 10 * weight + 6.25 * height - 5 * age - 161
-            
-            # Средний коэффициент активности
-            total_kcal = int(bmr * 1.375)
-            
-            # Коррекция под цель
-            if goal == 'weight_loss': total_kcal -= 400
-            elif goal == 'muscle_gain': total_kcal += 300
-            elif goal == 'recomposition': total_kcal -= 150 # Небольшой дефицит для рекомпозиции
-            
-            return total_kcal
-        except: return 2000
 
-    # --- 4. ЧАТ С ТРЕНЕРОМ ---
+            if gender == 'male':
+                bmr = 10 * w + 6.25 * h - 5 * a + 5
+            else:
+                bmr = 10 * w + 6.25 * h - 5 * a - 161
+            
+            target = int(bmr * 1.375)
+
+            if goal == 'weight_loss': target -= 400
+            elif goal == 'muscle_gain': target += 300
+            elif goal == 'recomposition': target -= 150
+            
+            return max(target, 1200) 
+        except Exception: 
+            return 2000
+
+    # --- 5. ЧАТ С ТРЕНЕРОМ ---
     async def get_chat_response(self, history: list, user_context: dict) -> str:
-        if not self.client: return "Ошибка конфигурации API"
+        if not self.client: return "Ошибка API"
+        name = user_context.get('name', 'атлет')
+        goal = user_context.get('goal', 'здоровье')
+        system = f"Ты тренер TrAIner. Твой подопечный: {name}. Цель: {goal}. Отвечай кратко и профессионально."
         try:
-            system_msg = f"Ты — фитнес-тренер TrAIner. Твой подопечный: {user_context.get('name', 'Атлет')}, цель: {user_context.get('goal', 'Здоровье')}."
-            msgs = [{"role": "system", "content": system_msg}] + history[-6:]
-            r = await self.client.chat.completions.create(messages=msgs, model=self.model)
+            r = await self.client.chat.completions.create(
+                messages=[{"role": "system", "content": system}] + history[-6:], 
+                model=self.model
+            )
             return clean_text(r.choices[0].message.content)
-        except Exception as e:
-            logger.error(f"Chat error: {e}")
+        except Exception: 
             return "Связь прервалась."

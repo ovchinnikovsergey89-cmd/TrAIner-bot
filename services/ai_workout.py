@@ -117,7 +117,7 @@ async def force_regen_workout(callback: CallbackQuery, session: AsyncSession, st
 
 # --- ЛОГИКА ГЕНЕРАЦИИ (Service) ---
 async def generate_workout_process(message: Message, session: AsyncSession, user, state: FSMContext):
-    loading_msg = await message.answer("🗓 <b>AI составляет программу... (10-15 сек)</b>", parse_mode=ParseMode.HTML)
+    loading_msg = await message.answer("🗓 <b>Тренер составляет программу... (10-15 сек)</b>", parse_mode=ParseMode.HTML)
     
     try:
         user_data = {
