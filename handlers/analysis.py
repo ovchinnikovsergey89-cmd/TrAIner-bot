@@ -90,12 +90,17 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
         )
         history_data = history_result.scalars().all()
 
-        # AI Анализ
+        # Получаем количество тренировок за неделю
+        workouts_count = await UserCRUD.get_weekly_workouts_count(session, message.from_user.id)
+
+        # AI Анализ с учетом тренировок
         ai = AIManager()
         ai_feedback = await ai.analyze_progress({
+            "name": user.name,
             "weight": old_weight_value if old_weight_value else new_weight, 
-            "goal": user.goal or "Поддержание"
-        }, new_weight)
+            "goal": user.goal or "Поддержание",
+            "workout_days": user.workout_days
+        }, new_weight, workouts_count)
 
         # Рисуем график
         graph_bytes = None

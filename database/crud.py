@@ -19,7 +19,19 @@ class UserCRUD:
             await session.refresh(user)
         
         return user
-
+    
+    @staticmethod
+    async def get_weekly_workouts_count(session: AsyncSession, telegram_id: int) -> int:
+        from database.models import WorkoutLog
+        # Считаем количество записей в логах за последние 7 дней
+        one_week_ago = datetime.now() - timedelta(days=7)
+        query = select(func.count(WorkoutLog.id)).where(
+            WorkoutLog.user_id == telegram_id,
+            WorkoutLog.date >= one_week_ago
+        )
+        result = await session.execute(query)
+        return result.scalar() or 0
+    
     @staticmethod
     async def add_user(session: AsyncSession, telegram_id: int, **kwargs):
         """Обертка для совместимости"""
