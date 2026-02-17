@@ -1,5 +1,6 @@
 import re
 import json
+import datetime
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -7,11 +8,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete
 
 from database.crud import UserCRUD
 from services.ai_manager import AIManager  # <--- НОВЫЙ ИМПОРТ
 from states.workout_states import WorkoutPagination
 from keyboards.pagination import get_pagination_kb
+from database.models import WorkoutLog
 
 router = Router()
 
@@ -29,16 +32,26 @@ def clean_text(text: str) -> str:
     text = text.replace("###", "").replace("SPLIT", "")
     return text.strip()
 
+# Найти текущую функцию и заменить на эту:
 async def show_workout_pages(message: Message, state: FSMContext, pages: list, from_db: bool = False):
-    """Показывает первую страницу программы"""
+    """Показывает первую страницу программы с кнопкой выполнения"""
     await state.update_data(workout_pages=pages, current_page=0)
     await state.set_state(WorkoutPagination.active)
     
     prefix = "💾 <b>Твоя сохраненная программа:</b>\n\n" if from_db else "🆕 <b>Новая программа готова:</b>\n\n"
     
+    # --- ДОБАВЛЯЕМ КНОПКУ ВЫПОЛНЕНИЯ ---
+    # Мы берем клавиатуру пагинации и добавляем в неё кнопку "Выполнено"
+    keyboard = get_pagination_kb(0, len(pages), page_type="workout")
+    
+    # Добавляем кнопку отдельным рядом сверху или снизу
+    keyboard.inline_keyboard.insert(0, [
+        InlineKeyboardButton(text="✅ Тренировка выполнена", callback_data="workout_done")
+    ])
+    
     await message.answer(
         text=prefix + pages[0],
-        reply_markup=get_pagination_kb(0, len(pages), page_type="workout"),
+        reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
 
@@ -111,7 +124,7 @@ async def force_regen_workout(callback: CallbackQuery, session: AsyncSession, st
 
 # --- ЛОГИКА ГЕНЕРАЦИИ (Service) ---
 async def generate_workout_process(message: Message, session: AsyncSession, user, state: FSMContext):
-    loading_msg = await message.answer("🗓 <b>AI составляет программу... (10-15 сек)</b>", parse_mode=ParseMode.HTML)
+    loading_msg = await message.answer("🗓 <b>Тренер составляет программу... (20 сек)</b>", parse_mode=ParseMode.HTML)
     
     try:
         user_data = {
@@ -162,17 +175,117 @@ async def change_page(callback: CallbackQuery, state: FSMContext):
             return
             
         await state.update_data(current_page=target_page)
+
+        # Получаем стандартную клавиатуру пагинации
+        keyboard = get_pagination_kb(target_page, len(pages), page_type="workout")
         
+        user_data = await state.get_data()
+        completed_days = user_data.get("completed_days", [])
+
+        if target_page < len(pages) - 1:
+            if target_page in completed_days:
+                btn_text = "🔄 Отменить выполнение"
+                btn_callback = f"workout_undo_{target_page}"
+            else:
+                btn_text = "✅ Тренировка выполнена"
+                btn_callback = "workout_done"
+                
+            keyboard.inline_keyboard.insert(0, [
+                InlineKeyboardButton(text=btn_text, callback_data=btn_callback)
+            ])
+        
+        # Проверяем, выполнена ли эта страница пользователем
+        completed_days = data.get("completed_days", [])
+        
+        page_text = pages[target_page]
+        if target_page in completed_days:
+            page_text += "\n\n🌟 <b>Эта тренировка выполнена!</b>"
+
+        # 🔥 ОДИН КОРРЕКТНЫЙ ВЫЗОВ ОБНОВЛЕНИЯ СООБЩЕНИЯ 🔥
         await callback.message.edit_text(
-            text=pages[target_page],
-            reply_markup=get_pagination_kb(target_page, len(pages), page_type="workout"),
+            text=page_text,
+            reply_markup=keyboard,
             parse_mode=ParseMode.HTML
         )
     except TelegramBadRequest:
         await callback.answer()
-    except Exception:
+    except Exception as e:
+        logger.error(f"Ошибка пагинации: {e}")
         await callback.answer()
 
 @router.callback_query(F.data == "noop")
 async def noop_btn(callback: CallbackQuery):
     await callback.answer()
+
+@router.callback_query(F.data == "workout_done")
+async def process_workout_done(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    data = await state.get_data()
+    current_page = data.get("current_page", 0)
+    pages = data.get("workout_pages", [])
+    completed_days = data.get("completed_days", [])
+    
+    # Сохраняем в БД
+    new_log = WorkoutLog(
+        user_id=callback.from_user.id,
+        date=datetime.datetime.now(),
+        workout_type=f"День {current_page + 1}"
+    )
+    session.add(new_log)
+    await session.commit()
+    
+    # Сохраняем в память
+    if current_page not in completed_days:
+        completed_days.append(current_page)
+        await state.update_data(completed_days=completed_days)
+
+    await callback.answer("💪 Мощно! Тренировка засчитана!", show_alert=True)
+    
+    # МГНОВЕННО ОБНОВЛЯЕМ КНОПКУ И ТЕКСТ
+    keyboard = get_pagination_kb(current_page, len(pages), page_type="workout")
+    keyboard.inline_keyboard.insert(0, [
+        InlineKeyboardButton(text="🔄 Отменить выполнение", callback_data=f"workout_undo_{current_page}")
+    ])
+    
+    try:
+        page_text = pages[current_page] + "\n\n🌟 <b>Эта тренировка выполнена!</b>"
+        await callback.message.edit_text(
+            text=page_text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+@router.callback_query(F.data.startswith("workout_undo_"))
+async def process_workout_undo(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    target_page = int(callback.data.split("_")[-1])
+    data = await state.get_data()
+    completed_days = data.get("completed_days", [])
+    pages = data.get("workout_pages", [])
+
+    # Удаляем из БД
+    stmt = delete(WorkoutLog).where(
+        WorkoutLog.user_id == callback.from_user.id,
+        WorkoutLog.workout_type == f"День {target_page + 1}"
+    )
+    await session.execute(stmt)
+    await session.commit()
+
+    # Удаляем из памяти
+    if target_page in completed_days:
+        completed_days.remove(target_page)
+        await state.update_data(completed_days=completed_days)
+
+    await callback.answer("Выполнение отменено", show_alert=True)
+
+    # ВОЗВРАЩАЕМ КНОПКУ "ВЫПОЛНЕНО"
+    keyboard = get_pagination_kb(target_page, len(pages), page_type="workout")
+    keyboard.inline_keyboard.insert(0, [
+        InlineKeyboardButton(text="✅ Тренировка выполнена", callback_data="workout_done")
+    ])
+
+    await callback.message.edit_text(
+        text=pages[target_page],
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )    
