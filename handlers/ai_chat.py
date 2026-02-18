@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +57,22 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
     if not user:
         await message.answer("Заполни профиль!")
         return
+    
+    # --- ПРОВЕРКА ЛИМИТА ---
+    if user.chat_limit <= 0:
+        await message.answer(
+            "🚀 <b>Упс! Попытки закончились</b>\n\n"
+            "Вы использовали все бесплатные вопросы. Чтобы продолжить общение с тренером, получите <b>Premium-пакет</b>.\n\n"
+            "💎 <b>Premium это:</b>\n"
+            "├ 50 новых планов тренировок\n"
+            "├ 100 вопросов личному AI-тренеру\n"
+            "└ Доступ ко всем функциям без ограничений",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Получить Premium", callback_data="buy_premium")]
+            ]),
+            parse_mode="HTML"
+        )
+        return
 
     loading_msg = await message.answer("💬 <i>Тренер пишет сообщение...</i>", parse_mode=ParseMode.HTML)
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -80,6 +96,10 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
     
     try:
         answer = await ai_service.get_chat_response(history, user_context)
+
+        # ✅ СПИСАНИЕ ЛИМИТА ПОСЛЕ УСПЕШНОГО ОТВЕТА
+        user.chat_limit -= 1
+        await session.commit() # Обязательно сохраняем изменения в БД
     except Exception as e:
         answer = "Прости, связь с сервером прервалась."
 

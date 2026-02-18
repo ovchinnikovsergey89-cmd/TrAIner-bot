@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func, ForeignKey
+from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func, ForeignKey, Boolean  # <-- Добавь Boolean сюда
 from sqlalchemy.orm import relationship
 from database.database import Base
 import datetime 
@@ -17,9 +17,13 @@ class User(Base):
     workout_level = Column(String, nullable=True)
     workout_days = Column(Integer, default=3)
     
-    # 🔥 НОВОЕ: Час уведомления (по умолчанию 8:00)
+    # --- СИСТЕМА МОНЕТИЗАЦИИ ---
+    is_premium = Column(Boolean, default=False) # Статус подписки
+    workout_limit = Column(Integer, default=3)   # Бесплатные генерации (базово 3)
+    chat_limit = Column(Integer, default=5)      # Бесплатные вопросы (базово 5)
+    # ---------------------------
+
     notification_time = Column(Integer, default=8)
-    
     current_workout_program = Column(String, nullable=True)
     current_nutrition_program = Column(String, nullable=True)
     

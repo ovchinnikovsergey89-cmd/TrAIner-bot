@@ -1,8 +1,9 @@
+import time
 import json
 import re
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 from aiogram.fsm.state import State, StatesGroup
@@ -11,6 +12,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.types import KeyboardButton
 
+from handlers.admin import is_admin
 from states.workout_states import WorkoutRequest
 from database.crud import UserCRUD
 from services.ai_manager import AIManager # <--- НОВЫЙ ИМПОРТ
@@ -134,6 +136,36 @@ async def process_nutrition_wishes(message: Message, state: FSMContext, session:
 
 # 5. Сама генерация (добавлен аргумент wishes)
 async def generate_nutrition_process(message: Message, session: AsyncSession, user, state: FSMContext, wishes: str, status_msg: Message = None):
+    # --- ЗАЩИТА ОТ СПАМА ---
+    user_data = await state.get_data()
+    last_gen_time = user_data.get("last_nutrition_gen_time", 0)
+    current_time = time.time()
+
+    if current_time - last_gen_time < 300 and not is_admin(message.from_user.id):
+        wait_time = int((300 - (current_time - last_gen_time)) / 60)
+        await message.answer(f"⏳ <b>Подождите {wait_time if wait_time > 0 else 1} мин.</b>\nНейросети нужно время.")
+        return
+    # --- ПРОВЕРКА ЛИМИТА ---
+    if user.workout_limit <= 0:
+        if status_msg: await status_msg.delete()
+        await message.answer(
+            "🚀 <b>Упс! Попытки закончились</b>\n\n"
+            "Вы использовали все бесплатные генерации. Чтобы составить новое меню, получите <b>Premium-пакет</b>.\n\n"
+            "💎 <b>Premium это:</b>\n"
+            "├ 50 новых планов тренировок\n"
+            "├ 100 вопросов личному AI-тренеру\n"
+            "└ Доступ ко всем функциям без ограничений",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Получить Premium", callback_data="buy_premium")]
+            ]),
+            parse_mode="HTML"
+        )
+        return
+    
+    # Обновляем время
+    await state.update_data(last_nutrition_gen_time=current_time)
+
+    # ... дальше идет try:
     try:
         user_data = {
             "goal": user.goal, "gender": user.gender, "weight": user.weight, 
@@ -152,6 +184,7 @@ async def generate_nutrition_process(message: Message, session: AsyncSession, us
         # Сохраняем в базу (Вариант 2, который мы обсуждали)
         import json
         user.current_nutrition_program = json.dumps(raw_pages, ensure_ascii=False)
+        user.workout_limit -= 1
         await session.commit()
 
         # 🔥 УДАЛЯЕМ сообщение "Тренер составляет меню..." перед показом результата

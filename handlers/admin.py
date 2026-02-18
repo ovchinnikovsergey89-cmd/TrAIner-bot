@@ -92,3 +92,27 @@ async def admin_backup(message: Message):
             
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
+
+from aiogram.fsm.context import FSMContext
+import time
+
+@router.message(Command("admin_boost"))
+async def admin_boost_cmd(message: Message, session: AsyncSession, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+
+    # 1. Начисляем лимиты в базе
+    user = await UserCRUD.get_user(session, message.from_user.id)
+    if user:
+        # Убедитесь, что эти колонки добавлены в models.py и базу данных
+        user.is_premium = True
+        user.workout_limit = 999
+        user.chat_limit = 999
+        await session.commit()
+    
+    # 2. Сбрасываем таймеры ожидания в FSM
+    await state.update_data(
+        last_workout_gen_time=0,
+        last_nutrition_gen_time=0
+    )
+    
+    await message.answer("🚀 <b>Босс, лимиты пополнены (999), таймеры сброшены!</b>", parse_mode="HTML")        

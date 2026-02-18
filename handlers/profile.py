@@ -34,7 +34,7 @@ ACTIVITY_MAP = {
     "moderate": "🏃 Средняя", "high": "🏋️ Высокая", "extreme": "🔥 Экстремальная"
 }
 
-# --- ФУНКЦИЯ ГЕНЕРАЦИИ ТЕКСТА ---
+# --- 1. ГЕНЕРАЦИЯ ТЕКСТА ---
 def get_profile_text(user):
     txt_name = html.escape(user.name or "Атлет")
     txt_age = user.age or "-"
@@ -47,9 +47,9 @@ def get_profile_text(user):
     txt_activity = ACTIVITY_MAP.get(act_val, act_val) if act_val else "-"
     txt_days = f"{user.workout_days} дн/нед" if user.workout_days else "-"
     
-    # 🔥 НОВОЕ: Отображение времени
     txt_time = f"{user.notification_time}:00" if user.notification_time is not None else "Откл"
-
+    status = "🌟 <b>Premium</b>" if user.is_premium else "🆓 <b>Бесплатный</b>"
+    
     return (
         f"👤 <b>Профиль: {txt_name}</b>\n"
         f"──────────────────\n"
@@ -60,10 +60,28 @@ def get_profile_text(user):
         f"🎯 <b>Цель:</b> {txt_goal}\n"
         f"💪 <b>Уровень:</b> {txt_level}\n"
         f"📅 <b>Режим:</b> {txt_days}\n"
+        f"──────────────────\n"
+        f"💎 <b>Статус:</b> {status}\n"
+        f"📊 <b>Остаток лимитов:</b>\n"
+        f"├ 🍏 Питание/Трен: <b>{user.workout_limit}</b>\n"
+        f"└ 💬 Вопросы AI: <b>{user.chat_limit}</b>\n"
+        f"──────────────────\n"
         f"⏰ <b>Уведомления:</b> {txt_time}"
     )
 
-# --- 1. ПРОСМОТР ПРОФИЛЯ ---
+# --- 2. ГЕНЕРАЦИЯ КЛАВИАТУРЫ (Чтобы кнопка Premium не пропадала) ---
+def get_profile_keyboard(user):
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
+    
+    # Кнопка Premium появляется, если нет подписки или мало лимитов
+    if not user.is_premium or (user.workout_limit is not None and user.workout_limit < 5):
+        kb.row(InlineKeyboardButton(text="💎 Получить Premium / Пополнить", callback_data="buy_premium"))
+        
+    kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
+    return kb.as_markup()
+
+# --- 3. ПРОСМОТР ПРОФИЛЯ ---
 @router.message(F.text == "👤 Профиль")
 @router.message(Command("profile"))
 async def show_profile_view(message: Message, session: AsyncSession, state: FSMContext):
@@ -73,75 +91,53 @@ async def show_profile_view(message: Message, session: AsyncSession, state: FSMC
         await message.answer("Сначала пройдите регистрацию: /start")
         return
 
-    text = get_profile_text(user)
-    
-    kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
-    # 🔥 НОВОЕ: Кнопка настройки времени
-    kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
-    
-    await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await message.answer(
+        text=get_profile_text(user),
+        reply_markup=get_profile_keyboard(user),
+        parse_mode="HTML"
+    )
 
-# --- 2. МЕНЮ РЕДАКТИРОВАНИЯ ---
+# --- 4. МЕНЮ РЕДАКТИРОВАНИЯ ---
 @router.callback_query(F.data == "open_edit_menu")
 async def show_edit_menu(event, session: AsyncSession, state: FSMContext):
     await state.clear()
     
-    if isinstance(event, Message):
-        message = event
-        user_id = message.from_user.id
-        is_callback = False
-    else:
-        message = event.message
-        user_id = event.from_user.id
-        is_callback = True
-
+    message = event if isinstance(event, Message) else event.message
+    user_id = event.from_user.id
     user = await UserCRUD.get_user(session, user_id)
     if not user: return
 
     text = get_profile_text(user) + "\n\n👇 <b>Выберите параметр для изменения:</b>"
 
     kb = InlineKeyboardBuilder()
-    kb.row(
-        InlineKeyboardButton(text="⚖️ Вес", callback_data="prof_weight"),
-        InlineKeyboardButton(text="📏 Рост", callback_data="prof_height"),
-        InlineKeyboardButton(text="🎂 Возраст", callback_data="prof_age")
-    )
-    kb.row(
-        InlineKeyboardButton(text="🎯 Цель", callback_data="prof_goal"),
-        InlineKeyboardButton(text="🏃 Активность", callback_data="prof_activity")
-    )
-    kb.row(
-        InlineKeyboardButton(text="💪 Уровень", callback_data="prof_level"),
-        InlineKeyboardButton(text="📅 Дни", callback_data="prof_days")
-    )
-    kb.row(
-        InlineKeyboardButton(text="👫 Пол", callback_data="prof_gender")
-    )
+    kb.row(InlineKeyboardButton(text="⚖️ Вес", callback_data="prof_weight"),
+           InlineKeyboardButton(text="📏 Рост", callback_data="prof_height"),
+           InlineKeyboardButton(text="🎂 Возраст", callback_data="prof_age"))
+    kb.row(InlineKeyboardButton(text="🎯 Цель", callback_data="prof_goal"),
+           InlineKeyboardButton(text="🏃 Активность", callback_data="prof_activity"))
+    kb.row(InlineKeyboardButton(text="💪 Уровень", callback_data="prof_level"),
+           InlineKeyboardButton(text="📅 Дни", callback_data="prof_days"))
+    kb.row(InlineKeyboardButton(text="👫 Пол", callback_data="prof_gender"))
     kb.row(InlineKeyboardButton(text="✅ Готово (Закрыть)", callback_data="close_edit_menu"))
 
-    if is_callback:
+    if isinstance(event, CallbackQuery):
         await message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
     else:
         await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
-# --- ВОЗВРАТ В ПРОСМОТР ---
 @router.callback_query(F.data == "close_edit_menu")
 async def close_edit(callback: CallbackQuery, session: AsyncSession):
     user = await UserCRUD.get_user(session, callback.from_user.id)
-    text = get_profile_text(user)
-    
-    kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
-    kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
-    
-    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await callback.message.edit_text(
+        text=get_profile_text(user),
+        reply_markup=get_profile_keyboard(user),
+        parse_mode="HTML"
+    )
 
-# --- 3. ЛОГИКА ВВОДА ---
+# --- 5. ЛОГИКА ВВОДА ДАННЫХ ---
 async def return_to_edit(message: Message, session: AsyncSession, state: FSMContext):
     await show_edit_menu(message, session, state)
 
-# Числа
 @router.callback_query(F.data == "prof_weight")
 async def ask_weight(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("⚖️ Введите новый вес (кг):")
@@ -158,6 +154,7 @@ async def save_weight(message: Message, state: FSMContext, session: AsyncSession
         else: await message.answer("❌ Введите реальный вес (30-250).")
     except: await message.answer("❌ Введите число.")
 
+# (Аналогично для Роста и Возраста)
 @router.callback_query(F.data == "prof_height")
 async def ask_height(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("📏 Введите новый рост (см):")
@@ -169,9 +166,7 @@ async def save_height(message: Message, state: FSMContext, session: AsyncSession
         val = float(message.text.replace(',', '.'))
         if 100 <= val <= 250:
             await UserCRUD.update_user(session, message.from_user.id, height=val)
-            await message.answer("✅ Рост сохранен.")
             await return_to_edit(message, session, state)
-        else: await message.answer("❌ Введите реальный рост (100-250).")
     except: await message.answer("❌ Введите число.")
 
 @router.callback_query(F.data == "prof_age")
@@ -183,11 +178,10 @@ async def ask_age(callback: CallbackQuery, state: FSMContext):
 async def save_age(message: Message, state: FSMContext, session: AsyncSession):
     if message.text.isdigit() and 10 <= int(message.text) <= 100:
         await UserCRUD.update_user(session, message.from_user.id, age=int(message.text))
-        await message.answer("✅ Возраст сохранен.")
         await return_to_edit(message, session, state)
     else: await message.answer("❌ Введите число (10-100).")
 
-# Кнопки выбора
+# Кнопки выбора (Цель, Активность и т.д.)
 @router.callback_query(F.data == "prof_goal")
 async def ask_goal(callback: CallbackQuery):
     await callback.message.delete()
@@ -198,7 +192,6 @@ async def save_goal(message: Message, session: AsyncSession, state: FSMContext):
     code = next((k for k, v in GOAL_MAP.items() if v == message.text), None)
     if code:
         await UserCRUD.update_user(session, message.from_user.id, goal=code)
-        await message.answer("✅ Цель обновлена.", reply_markup=get_main_menu())
         await return_to_edit(message, session, state)
 
 @router.callback_query(F.data == "prof_activity")
@@ -214,7 +207,6 @@ async def save_activity(message: Message, session: AsyncSession, state: FSMConte
     elif "Высокая" in message.text: val = "high"
     elif "Экстремальная" in message.text: val = "extreme"
     await UserCRUD.update_user(session, message.from_user.id, activity_level=val)
-    await message.answer("✅ Активность обновлена.", reply_markup=get_main_menu())
     await return_to_edit(message, session, state)
 
 @router.callback_query(F.data == "prof_level")
@@ -222,13 +214,12 @@ async def ask_level(callback: CallbackQuery):
     await callback.message.delete()
     await callback.message.answer("💪 Выберите уровень:", reply_markup=get_workout_level_keyboard())
 
-@router.message(F.text.in_(LEVEL_MAP.values()) | F.text.contains("Начинающий") | F.text.contains("Любитель") | F.text.contains("Продвинутый") | F.text.contains("Новичок"))
+@router.message(F.text.in_(LEVEL_MAP.values()) | F.text.contains("Новичок") | F.text.contains("Любитель") | F.text.contains("Продвинутый"))
 async def save_level(message: Message, session: AsyncSession, state: FSMContext):
     code = "beginner"
-    if "Любитель" in message.text or "Продолжающий" in message.text: code = "intermediate"
+    if "Любитель" in message.text: code = "intermediate"
     elif "ПРО" in message.text or "Продвинутый" in message.text: code = "advanced"
     await UserCRUD.update_user(session, message.from_user.id, workout_level=code)
-    await message.answer("✅ Уровень обновлен.", reply_markup=get_main_menu())
     await return_to_edit(message, session, state)
 
 @router.callback_query(F.data == "prof_days")
@@ -240,10 +231,8 @@ async def ask_days(callback: CallbackQuery):
 async def save_days(message: Message, session: AsyncSession, state: FSMContext):
     try:
         d = int(re.search(r'\d+', message.text).group())
-        if 1 <= d <= 7:
-            await UserCRUD.update_user(session, message.from_user.id, workout_days=d)
-            await message.answer(f"✅ Дней в неделю: {d}", reply_markup=get_main_menu())
-            await return_to_edit(message, session, state)
+        await UserCRUD.update_user(session, message.from_user.id, workout_days=d)
+        await return_to_edit(message, session, state)
     except: pass
 
 @router.callback_query(F.data == "prof_gender")
@@ -255,22 +244,19 @@ async def ask_gender(callback: CallbackQuery):
 async def save_gender(message: Message, session: AsyncSession, state: FSMContext):
     code = "male" if "Мужской" in message.text else "female"
     await UserCRUD.update_user(session, message.from_user.id, gender=code)
-    await message.answer("✅ Пол обновлен.", reply_markup=get_main_menu())
     await return_to_edit(message, session, state)
 
-# --- 4. НОВЫЕ ФУНКЦИИ: НАСТРОЙКА ВРЕМЕНИ ---
-
+# --- 6. НАСТРОЙКА ВРЕМЕНИ ---
 @router.callback_query(F.data == "change_notif_time")
 async def ask_notif_time(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
-    # Кнопки с 06:00 до 23:00
     hours = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     for h in hours:
         builder.add(InlineKeyboardButton(text=f"{h}:00", callback_data=f"set_time_{h}"))
-    builder.adjust(4) # По 4 в ряд
+    builder.adjust(4)
     
     await callback.message.edit_text(
-        "⏰ <b>Выберите время для ежедневной мотивации:</b>\n(По Московскому времени)", 
+        "⏰ <b>Выберите время уведомлений:</b>", 
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -278,17 +264,16 @@ async def ask_notif_time(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("set_time_"))
 async def save_notif_time(callback: CallbackQuery, session: AsyncSession):
     hour = int(callback.data.split("_")[-1])
-    
     await UserCRUD.update_user(session, callback.from_user.id, notification_time=hour)
-    
     await callback.answer(f"Время установлено: {hour}:00")
     
-    # Возвращаемся в профиль
     user = await UserCRUD.get_user(session, callback.from_user.id)
-    text = get_profile_text(user)
-    
-    kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
-    kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
-    
-    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    await callback.message.edit_text(
+        text=get_profile_text(user),
+        reply_markup=get_profile_keyboard(user),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "buy_premium")
+async def process_buy_premium(callback: CallbackQuery):
+    await callback.answer("💳 Модуль оплаты будет доступен в следующем обновлении!", show_alert=True)

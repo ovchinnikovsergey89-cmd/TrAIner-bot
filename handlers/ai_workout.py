@@ -1,9 +1,10 @@
+import time
 import re
 import json
 import datetime
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from states.workout_states import WorkoutPagination, WorkoutRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
@@ -11,6 +12,8 @@ from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete
 
+from handlers.admin import is_admin
+from utils.text_tools import clean_text
 from database.crud import UserCRUD
 from services.ai_manager import AIManager  # <--- НОВЫЙ ИМПОРТ
 from states.workout_states import WorkoutPagination
@@ -19,20 +22,6 @@ from database.models import WorkoutLog
 from aiogram.utils.keyboard import ReplyKeyboardBuilder # Для кнопки пропуска
 
 router = Router()
-
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-def clean_text(text: str) -> str:
-    """Чистильщик текста (локальная доработка форматирования)"""
-    if not text: return ""
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    text = re.sub(r'\*(.*?)\*', r'<b>\1</b>', text)
-    # Жирный шрифт для "День X"
-    text = re.sub(r'(^|\n)(День \d+:.*?)(?=\n|$)', r'\1<b>\2</b>', text)
-    # Жирный шрифт для "Советы"
-    text = re.sub(r'(^|\n)(💡.*?)(?=\n|$)', r'\1<b>\2</b>', text)
-    
-    text = text.replace("###", "").replace("SPLIT", "")
-    return text.strip()
 
 # Найти текущую функцию и заменить на эту:
 async def show_workout_pages(message: Message, state: FSMContext, pages: list, from_db: bool = False):
@@ -177,6 +166,34 @@ async def force_regen_workout(callback: CallbackQuery, session: AsyncSession, st
 
 # --- ЛОГИКА ГЕНЕРАЦИИ (Service) ---
 async def generate_workout_process(message: Message, session: AsyncSession, user, state: FSMContext, wishes: str = None):
+    # --- ЗАЩИТА ОТ СПАМА (Раз в 5 минут) ---
+    user_data = await state.get_data()
+    last_gen_time = user_data.get("last_workout_gen_time", 0)
+    current_time = time.time()
+    
+    if current_time - last_gen_time < 300 and not is_admin(message.from_user.id):
+        wait_time = int((300 - (current_time - last_gen_time)) / 60)
+        await message.answer(f"⏳ <b>Подождите {wait_time if wait_time > 0 else 1} мин.</b>\nНейросети нужно время.")
+        return
+    # --- ПРОВЕРКА ЛИМИТА ---
+    if user.workout_limit <= 0:
+        await message.answer(
+            "🚀 <b>Упс! Попытки закончились</b>\n\n"
+            "Вы использовали все бесплатные генерации. Чтобы составить новый план тренировок, получите <b>Premium-пакет</b>.\n\n"
+            "💎 <b>Premium это:</b>\n"
+            "├ 50 новых планов тренировок\n"
+            "├ 100 вопросов личному AI-тренеру\n"
+            "└ Доступ ко всем функциям без ограничений",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Получить Premium", callback_data="buy_premium")]
+            ]),
+            parse_mode="HTML"
+        )
+        return
+    # Если всё ок, перед самой генерацией обновляем время:
+    await state.update_data(last_workout_gen_time=current_time)
+
+    # ... дальше твой код (loading_msg и т.д.)
     loading_msg = await message.answer("🗓 <b>Тренер изучает пожелания и составляет программу...</b>", parse_mode=ParseMode.HTML)
     
     try:
@@ -204,6 +221,10 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
 
         # 🔥 СОХРАНЯЕМ В БАЗУ ДАННЫХ 🔥
         pages_json = json.dumps(cleaned_pages, ensure_ascii=False)
+        user.current_workout_program = pages_json
+        
+        user.workout_limit -= 1 # Минус одна попытка
+        await session.commit()  # Сохраняем всё в базу
         await UserCRUD.update_user(session, user.telegram_id, current_workout_program=pages_json)
 
         await loading_msg.delete()
