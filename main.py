@@ -15,9 +15,9 @@ from handlers import start, help, profile, workout, nutrition, ai_workout, ai_ch
 from middlewares.db_middleware import DbSessionMiddleware
 from services.scheduler import send_morning_motivation
 
-# 1. Основная настройка логирования
+# 1. Основная настройка (оставляем INFO, чтобы видеть твои ракеты и галочки)
 logging.basicConfig(
-    level=logging.WARNING, # 🔥 Изменили с INFO на WARNING (скроет действия пользователей)
+    level=logging.INFO, 
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("bot.log", encoding='utf-8'),
@@ -25,10 +25,15 @@ logging.basicConfig(
     ]
 )
 
-# 2. Принудительно глушим лишние логи от библиотек
-logging.getLogger("aiogram").setLevel(logging.ERROR)     # Только ошибки бота
-logging.getLogger("apscheduler").setLevel(logging.ERROR) # Только ошибки планировщика
-logging.getLogger("aiosqlite").setLevel(logging.ERROR)   # Только ошибки базы данных
+# 2. А теперь "прикручиваем звук" только у библиотек
+# Это уберет сообщения "Update id=... is handled" и прочий шум
+logging.getLogger("aiogram").setLevel(logging.WARNING)
+logging.getLogger("aiogram.dispatcher").setLevel(logging.WARNING)
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+
+# Планировщик оставим в INFO, чтобы видеть, что работа добавлена, 
+# либо тоже в WARNING, если он слишком часто спамит
+logging.getLogger("apscheduler").setLevel(logging.INFO) 
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +86,6 @@ async def main():
         start.router,     # Регистрация
         profile.router,   # Профиль и настройки
         workout.router,   # Тренировки (старые)
-        ai_workout.router,# AI Тренировки
         ai_chat.router,   # Чат с тренером
         help.router       # Помощь (в конце)
     )
