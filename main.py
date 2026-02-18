@@ -15,14 +15,21 @@ from handlers import start, help, profile, workout, nutrition, ai_workout, ai_ch
 from middlewares.db_middleware import DbSessionMiddleware
 from services.scheduler import send_morning_motivation
 
+# 1. Основная настройка логирования
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING, # 🔥 Изменили с INFO на WARNING (скроет действия пользователей)
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("bot.log", encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
+
+# 2. Принудительно глушим лишние логи от библиотек
+logging.getLogger("aiogram").setLevel(logging.ERROR)     # Только ошибки бота
+logging.getLogger("apscheduler").setLevel(logging.ERROR) # Только ошибки планировщика
+logging.getLogger("aiosqlite").setLevel(logging.ERROR)   # Только ошибки базы данных
+
 logger = logging.getLogger(__name__)
 
 async def on_startup(bot: Bot):
@@ -67,6 +74,7 @@ async def main():
     # --- ПОРЯДОК РОУТЕРОВ (ВАЖЕН!) ---
     dp.include_routers(
         admin.router,     # Админка (всегда первая)
+        ai_workout.router,# Перенесите сюда (теперь он приоритетный)
         common.router,    # Общие команды (/cancel, Техника)
         analysis.router,  # Анализ веса (чтобы перехватывать числа)
         nutrition.router, # Питание

@@ -3,7 +3,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.enums import ParseMode
 
-from keyboards.builders import get_main_menu
+from keyboards.main_menu import get_main_menu
 
 router = Router()
 

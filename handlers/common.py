@@ -6,9 +6,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from keyboards.builders import get_main_menu
-from services.rutube_service import search_exercise_video
 from keyboards.main_menu import get_main_menu
+from services.rutube_service import search_exercise_video
 
 router = Router()
 

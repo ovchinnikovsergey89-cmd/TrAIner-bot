@@ -5,3 +5,4 @@ class WorkoutPagination(StatesGroup):
 
 class WorkoutRequest(StatesGroup):
     waiting_for_wishes = State() # Новое состояние для пожеланий
+    waiting_for_nutrition_wishes = State()

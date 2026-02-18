@@ -17,6 +17,7 @@ from keyboards.builders import (
     get_workout_days_keyboard,
     get_main_menu
 )
+from keyboards.main_menu import get_main_menu
 
 router = Router()
 logger = logging.getLogger(__name__)

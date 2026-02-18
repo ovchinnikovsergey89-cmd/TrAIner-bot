@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.crud import UserCRUD
 from services.ai_manager import AIManager # <--- НОВЫЙ ИМПОРТ
 from states.chat_states import AIChatState
-from keyboards.builders import get_main_menu
+from keyboards.main_menu import get_main_menu
 
 router = Router()
 

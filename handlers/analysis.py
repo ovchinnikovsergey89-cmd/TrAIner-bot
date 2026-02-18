@@ -12,7 +12,7 @@ from database.crud import UserCRUD
 from database.models import WeightHistory
 from services.ai_manager import AIManager
 from services.graph_service import GraphService
-from keyboards.builders import get_main_menu
+from keyboards.main_menu import get_main_menu
 
 router = Router()
 logger = logging.getLogger(__name__)
