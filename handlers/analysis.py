@@ -1,6 +1,6 @@
-import time
 import logging
-import datetime
+import time
+from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.types import Message, BufferedInputFile
 from aiogram.enums import ParseMode, ChatAction
@@ -43,10 +43,9 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
             await message.answer("⚠️ Введите корректное число (например: 80.5)")
             return
 
-        # 2. ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЯ (ИСПРАВЛЕНО)
+        # 2. Получение пользователя
         user = await UserCRUD.get_user(session, message.from_user.id)
         if not user:
-            # Если юзера нет в памяти, пробуем найти/создать его по ID
             user = await UserCRUD.get_or_create_user(session, message.from_user.id)
 
         if not user:
@@ -54,32 +53,43 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
             await state.clear()
             return
 
-        # 3. БЛОК ОГРАНИЧЕНИЙ (22 ЧАСА И ЛИМИТЫ)
-        import time
-        user_data = await state.get_data()
-        last_analysis_time = user_data.get("last_analysis_time", 0)
-        current_time = time.time()
+        # 3. СТРОГИЙ БЛОК ОГРАНИЧЕНИЙ (22 часа и 3 попытки)
+        current_time = datetime.now()
 
         if not is_admin(message.from_user.id):
-            # Проверка времени
-            if current_time - last_analysis_time < 79200:
-                hours_left = int((79200 - (current_time - last_analysis_time)) / 3600)
-                await message.answer(f"⏳ Анализ доступен раз в 22 часа. Попробуйте через {max(hours_left, 1)} ч.")
-                await state.clear()
-                return
-            
-            # Проверка лимита (безопасная)
-            user_limit = user.workout_limit if user.workout_limit is not None else 0
-            if user_limit <= 0:
+            # Проверка времени из базы
+            if user.last_analysis_date:
+                last_date = user.last_analysis_date
+                # Конвертация, если SQLite вернул строку
+                if isinstance(last_date, str):
+                    try:
+                        last_date = datetime.strptime(last_date, '%Y-%m-%d %H:%M:%S.%f')
+                    except:
+                        last_date = datetime.strptime(last_date, '%Y-%m-%d %H:%M:%S')
+
+                delta = current_time - last_date
+                
+                if delta < timedelta(hours=22):
+                    wait_time = timedelta(hours=22) - delta
+                    hours = wait_time.seconds // 3600
+                    minutes = (wait_time.seconds // 60) % 60
+                    
+                    await message.answer(
+                        f"⏳ <b>Доступ ограничен!</b>\n\nАнализ можно делать раз в 22 часа.\n"
+                        f"Приходите через: <b>{hours} ч. {minutes} мин.</b>",
+                        parse_mode="HTML"
+                    )
+                    await state.clear()
+                    return
+
+            # Проверка недельного лимита
+            if (user.workout_limit or 0) <= 0:
                 await message.answer("❌ У вас закончились бесплатные попытки анализа.")
                 await state.clear()
                 return
 
-        # --- ДАЛЬШЕ ИДЕТ ВАША ЛОГИКА ИСТОРИИ И ГРАФИКА ---
-        # Проверяем старый вес для расчета разницы
+        # 4. ЛОГИКА СОХРАНЕНИЯ
         old_weight_value = user.weight
-        
-        # Сохраняем в историю и обновляем профиль
         session.add(WeightHistory(user_id=user.telegram_id, weight=new_weight))
         await UserCRUD.update_user(session, user.telegram_id, weight=new_weight)
         
@@ -91,14 +101,13 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
 
         temp_msg = await message.answer(f"{trend}\n⏱ <b>Сохраняю и строю график...</b>", parse_mode=ParseMode.HTML)
 
-        # Получаем данные для графика и ИИ
+        # 5. ДАННЫЕ ДЛЯ ГРАФИКА И ИИ
         history_result = await session.execute(
             select(WeightHistory).where(WeightHistory.user_id == user.telegram_id).order_by(WeightHistory.date)
         )
         history_data = history_result.scalars().all()
         workouts_count = await UserCRUD.get_weekly_workouts_count(session, message.from_user.id)
 
-        # Генерация совета ИИ
         ai = AIManager()
         ai_feedback = await ai.analyze_progress({
             "name": user.name,
@@ -107,7 +116,6 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
             "workout_days": user.workout_days
         }, new_weight, workouts_count)
 
-        # График
         graph_bytes = None
         if history_data:
             graph_buf = await GraphService.create_weight_graph(history_data)
@@ -123,17 +131,26 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
             f"💬 <b>Совет тренера:</b>\n{ai_feedback}"
         )
 
-        # 4. ФИНАЛЬНАЯ ОТПРАВКА
+        # 6. ОТПРАВКА
         if graph_bytes:
             await message.answer_photo(graph_bytes, caption=result_text, reply_markup=get_main_menu())
         else:
             await message.answer(result_text, reply_markup=get_main_menu())
 
-        # 5. СПИСАНИЕ ЛИМИТОВ (ТОЛЬКО ЮЗЕРАМ)
+        # 7. СПИСАНИЕ ЛИМИТОВ (ТОЛЬКО ЮЗЕРАМ)
         if not is_admin(message.from_user.id):
-            user.workout_limit -= 1  
-            await state.update_data(last_analysis_time=current_time)
-            await session.commit()
+            if user.workout_limit and user.workout_limit > 0:
+                user.workout_limit -= 1
+            
+            user.last_analysis_date = datetime.now()
+            
+            try:
+                await session.flush()
+                await session.commit()
+                logger.info(f"Limits updated for user {user.telegram_id}")
+            except Exception as e:
+                await session.rollback()
+                logger.error(f"DB Commit Error: {e}")
             
     except Exception as e:
         logger.error(f"Analysis error: {e}")

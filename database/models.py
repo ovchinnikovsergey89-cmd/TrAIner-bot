@@ -20,6 +20,7 @@ class User(Base):
     # --- СИСТЕМА МОНЕТИЗАЦИИ ---
     is_premium = Column(Boolean, default=False) # Статус подписки
     workout_limit = Column(Integer, default=3)   # Бесплатные генерации (базово 3)
+    last_analysis_date = Column(DateTime, nullable=True)
     chat_limit = Column(Integer, default=5)      # Бесплатные вопросы (базово 5)
     # ---------------------------
 

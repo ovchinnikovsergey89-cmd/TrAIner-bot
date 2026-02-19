@@ -205,16 +205,34 @@ class AIManager:
 
     # --- 5. ЧАТ С ТРЕНЕРОМ ---
     async def get_chat_response(self, history: list, user_context: dict) -> str:
-        if not self.client: return "Ошибка API"
+        if not self.client: return "Ошибка: API не настроен"
+        
         name = user_context.get('name', 'атлет')
-        goal = user_context.get('goal', 'здоровье')
-        system = f"Ты тренер TrAIner. Твой подопечный: {name}. Цель: {goal}. Отвечай кратко и профессионально."
+        goal = user_context.get('goal', 'фитнес')
+        
+        # Упрощаем промпт до предела, чтобы ИИ не боялся отвечать
+        system_prompt = (
+            f"Ты — тренер TrAIner. Твой клиент: {name}, цель: {goal}. "
+            "Отвечай на ВСЕ вопросы. Если спрашивают про боль — дай совет по отдыху. "
+            "Если спрашивают 'работаем?' — предлагай тренировку. "
+            "НЕ используй символы #, *, _ и сложные теги. Пиши простым текстом."
+        )
+
         try:
-            r = await self.client.chat.completions.create(
-                messages=[{"role": "system", "content": system}] + history[-6:], 
+            response = await self.client.chat.completions.create(
                 model=self.model,
-                timeout=90.0
+                messages=[{"role": "system", "content": system_prompt}] + history[-6:],
+                temperature=0.7,
+                timeout=60.0 # Ждем до минуты
             )
-            return clean_text(r.choices[0].message.content)
-        except Exception: 
-            return "Связь прервалась."
+            
+            result = response.choices[0].message.content
+            if not result:
+                return "Я тут, готов к работе! О чем хочешь поговорить?"
+            
+            # Очищаем текст от Markdown-звездочек, которые ломают Telegram
+            result = result.replace("*", "").replace("#", "")
+            return result
+        except Exception as e:
+            logger.error(f"DeepSeek Error: {e}")
+            return f"Ошибка связи с ИИ: {str(e)}"

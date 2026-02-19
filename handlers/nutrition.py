@@ -326,3 +326,10 @@ async def process_recipe_search(message: Message, state: FSMContext):
         if 'loading' in locals(): await loading.delete()
         await message.answer("❌ Ошибка при поиске. Попробуй позже.")
         await state.clear()
+
+# Добавь этот хендлер в конец файлов
+@router.callback_query(F.data == "ai_chat")
+async def redirect_to_chat(callback: CallbackQuery, state: FSMContext):
+    from handlers.ai_chat import start_chat_logic
+    await callback.answer()
+    await start_chat_logic(callback.message, state)        

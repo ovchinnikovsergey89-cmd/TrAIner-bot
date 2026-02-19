@@ -366,3 +366,10 @@ async def process_workout_undo(callback: CallbackQuery, session: AsyncSession, s
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )    
+
+# Добавь этот хендлер в конец файлов
+@router.callback_query(F.data == "ai_chat")
+async def redirect_to_chat(callback: CallbackQuery, state: FSMContext):
+    from handlers.ai_chat import start_chat_logic
+    await callback.answer()
+    await start_chat_logic(callback.message, state)    

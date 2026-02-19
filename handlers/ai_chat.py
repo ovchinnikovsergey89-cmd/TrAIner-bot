@@ -1,3 +1,5 @@
+import html
+import logging
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -5,9 +7,13 @@ from aiogram.enums import ParseMode
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.crud import UserCRUD
-from services.ai_manager import AIManager # <--- НОВЫЙ ИМПОРТ
+from services.ai_manager import AIManager 
 from states.chat_states import AIChatState
 from keyboards.main_menu import get_main_menu
+from handlers.admin import is_admin  # Важно: импорт должен быть здесь!
+
+# Настройка логгера, чтобы видеть ошибки в консоли
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -17,94 +23,87 @@ def get_chat_kb():
         resize_keyboard=True
     )
 
-# --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def start_chat_logic(message: Message, state: FSMContext):
     await state.update_data(chat_history=[]) 
-    
     welcome_text = (
         "👨‍✈️ <b>Тренер на связи!</b>\n\n"
-        "Я помню ваши параметры (вес, цель, возраст). Спрашивайте!\n"
-        "<i>(Например: 'Можно ли мне сладкое?' или 'Почему болят колени?')</i>"
+        "Я помню ваши параметры. Спрашивайте!\n"
+        "<i>(Например: 'Можно ли мне сладкое? или Присутствует боль в ногах, дай меньше нагрузку на ноги!')</i>"
     )
-    
-    await message.answer(
-        welcome_text,
-        reply_markup=get_chat_kb(),
-        parse_mode=ParseMode.HTML
-    )
+    await message.answer(welcome_text, reply_markup=get_chat_kb(), parse_mode=ParseMode.HTML)
     await state.set_state(AIChatState.chatting)
 
-# 1. ВХОД ЧЕРЕЗ ТЕКСТОВУЮ КНОПКУ
 @router.message(F.text == "💬 Чат с тренером")
 async def start_chat_text(message: Message, state: FSMContext):
     await start_chat_logic(message, state)
 
-# 2. ВХОД ЧЕРЕЗ ИНЛАЙН-КНОПКУ
-@router.callback_query(F.data == "ai_chat")
-async def start_chat_callback(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await start_chat_logic(callback.message, state)
+# ... (в начале файла убедись, что импорты такие)
+import html
+from handlers.admin import is_admin
+# ...
 
-# 3. ОБРАБОТКА СООБЩЕНИЙ В ЧАТЕ
+import html # Добавь в начало файла
+
 @router.message(AIChatState.chatting)
 async def process_chat_message(message: Message, state: FSMContext, session: AsyncSession):
-    if message.text in ["🔙 Вернуться в меню", "стоп", "выход", "/start"]:
+    # Инициализируем всё в самом начале
+    user_text = message.text or ""
+    ai_answer = ""
+    loading_msg = None
+    
+    # Выход из чата
+    if user_text in ["🔙 Вернуться в меню", "стоп", "выход", "/start"]:
         await state.clear()
         await message.answer("Чат завершен.", reply_markup=get_main_menu())
         return
 
-    user = await UserCRUD.get_user(session, message.from_user.id)
-    if not user:
-        await message.answer("Заполни профиль!")
-        return
-    
-    # --- ПРОВЕРКА ЛИМИТА ---
-    if user.chat_limit <= 0:
-        await message.answer(
-            "🚀 <b>Упс! Попытки закончились</b>\n\n"
-            "Вы использовали все бесплатные вопросы. Чтобы продолжить общение с тренером, получите <b>Premium-пакет</b>.\n\n"
-            "💎 <b>Premium это:</b>\n"
-            "├ 50 новых планов тренировок\n"
-            "├ 100 вопросов личному AI-тренеру\n"
-            "└ Доступ ко всем функциям без ограничений",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💎 Получить Premium", callback_data="buy_premium")]
-            ]),
-            parse_mode="HTML"
-        )
-        return
-
-    loading_msg = await message.answer("💬 <i>Тренер пишет сообщение...</i>", parse_mode=ParseMode.HTML)
-    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-
-    data = await state.get_data()
-    history = data.get("chat_history", [])
-    history.append({"role": "user", "content": message.text})
-    
-    # --- ИСПОЛЬЗУЕМ НОВЫЙ МЕНЕДЖЕР ---
-    ai_service = AIManager()
-    
-    user_context = {
-        "gender": user.gender,
-        "weight": user.weight,
-        "height": user.height,
-        "age": user.age,
-        "goal": user.goal,
-        "activity_level": user.activity_level,
-        "name": user.name
-    }
-    
     try:
-        answer = await ai_service.get_chat_response(history, user_context)
+        # Получаем данные
+        user = await UserCRUD.get_user(session, message.from_user.id)
+        is_admin_user = is_admin(message.from_user.id)
 
-        # ✅ СПИСАНИЕ ЛИМИТА ПОСЛЕ УСПЕШНОГО ОТВЕТА
-        user.chat_limit -= 1
-        await session.commit() # Обязательно сохраняем изменения в БД
+        # Проверка лимитов
+        if not is_admin_user and (user.chat_limit or 0) <= 0:
+            await message.answer("🚀 Попытки закончились!")
+            return
+
+        # Показываем статус "печатает"
+        await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+        loading_msg = await message.answer("💬 <b>Тренер думает...</b>", parse_mode="HTML")
+
+        # Работа с историей
+        state_data = await state.get_data()
+        current_history = state_data.get("chat_history", [])
+        current_history.append({"role": "user", "content": user_text})
+
+        # ЗАПРОС К ИИ
+        manager = AIManager()
+        u_ctx = {"name": user.name, "goal": user.goal, "weight": user.weight}
+        
+        ai_answer = await manager.get_chat_response(current_history, u_ctx)
+
+        # Списание лимита (только после получения ответа)
+        if not is_admin_user:
+            user.chat_limit -= 1
+            await session.commit()
+
+        # Сохраняем историю
+        current_history.append({"role": "assistant", "content": ai_answer})
+        await state.update_data(chat_history=current_history[-6:])
+
+        # Удаляем "лоадинг" и отправляем ответ
+        if loading_msg:
+            await loading_msg.delete()
+        
+        # Самая безопасная отправка: если HTML не проходит, шлем обычным текстом
+        try:
+            await message.answer(ai_answer, parse_mode="HTML")
+        except:
+            await message.answer(ai_answer)
+
     except Exception as e:
-        answer = "Прости, связь с сервером прервалась."
-
-    history.append({"role": "assistant", "content": answer})
-    await state.update_data(chat_history=history)
-    
-    await loading_msg.delete()
-    await message.answer(answer, parse_mode=ParseMode.HTML)
+        logger.error(f"Final Chat Error: {e}")
+        if loading_msg:
+            try: await loading_msg.delete()
+            except: pass
+        await message.answer(f"⚠️ Ошибка: {e}")
