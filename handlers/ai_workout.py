@@ -4,7 +4,7 @@ import json
 import datetime
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
 from states.workout_states import WorkoutPagination, WorkoutRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
@@ -24,27 +24,66 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder # Для кнопки п
 router = Router()
 
 # Найти текущую функцию и заменить на эту:
-async def show_workout_pages(message: Message, state: FSMContext, pages: list, from_db: bool = False):
-    """Показывает первую страницу программы с кнопкой выполнения"""
+async def show_workout_pages(message: Message, state: FSMContext, pages: list, from_db: bool = False, completed_days_direct: list = None):
+    # 1. Сохраняем состояние
     await state.update_data(workout_pages=pages, current_page=0)
+    
+    if completed_days_direct is not None:
+        await state.update_data(completed_days=completed_days_direct)
+        check_list = completed_days_direct
+    else:
+        data = await state.get_data()
+        check_list = data.get("completed_days", [])
+    
     await state.set_state(WorkoutPagination.active)
     
-    prefix = "💾 <b>Твоя сохраненная программа:</b>\n\n" if from_db else "🆕 <b>Новая программа готова:</b>\n\n"
+    current_page = 0
+    page_text = pages[current_page]
     
-    # --- ДОБАВЛЯЕМ КНОПКУ ВЫПОЛНЕНИЯ ---
-    # Мы берем клавиатуру пагинации и добавляем в неё кнопку "Выполнено"
-    keyboard = get_pagination_kb(0, len(pages), page_type="workout")
+    # 2. Получаем БАЗОВУЮ клавиатуру (стрелки и т.д.)
+    base_kb = get_pagination_kb(current_page, len(pages), page_type="workout")
     
-    # Добавляем кнопку отдельным рядом сверху или снизу
-    keyboard.inline_keyboard.insert(0, [
-        InlineKeyboardButton(text="✅ Тренировка выполнена", callback_data="workout_done")
-    ])
-    
-    await message.answer(
-        text=prefix + pages[0],
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
-    )
+    # 3. ЛОГИКА КНОПКИ
+    # Берем только самую первую строку (заголовок) для проверки
+    first_line = page_text.split('\n')[0].upper()
+    rest_keywords = ["ВОССТАНОВЛЕНИЕ", "ОТДЫХ", "ВЫХОДНОЙ"]
+    is_rest_day = any(word in first_line for word in rest_keywords)
+    is_advice_page = current_page == len(pages) - 1
+
+    # Создаем новый список рядов для кнопок
+    rows = []
+
+    # Добавляем кнопку выполнения ПЕРВЫМ рядом, если это не отдых
+    if not is_rest_day and not is_advice_page:
+        if current_page in check_list:
+            btn_text, btn_cb = "🔄 Отменить выполнение", f"workout_undo_{current_page}"
+        else:
+            btn_text, btn_cb = "✅ Тренировка выполнена", "workout_done"
+        
+        # ВАЖНО: Добавляем как список (ряд)
+        rows.append([InlineKeyboardButton(text=btn_text, callback_data=btn_cb)])
+
+    # Добавляем все остальные ряды из базовой клавиатуры (стрелки, советы и т.д.)
+    if base_kb and base_kb.inline_keyboard:
+        rows.extend(base_kb.inline_keyboard)
+
+    # Создаем итоговый объект клавиатуры
+    final_keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    # 4. Формируем текст
+    prefix = "💾 <b>Твоя программа:</b>\n\n" if from_db else "🆕 <b>Программа готова:</b>\n\n"
+    display_text = prefix + page_text
+    if current_page in check_list:
+         display_text += "\n\n🌟 <b>Эта тренировка выполнена!</b>"
+
+    # 5. ОТПРАВКА (строго один вызов)
+    if isinstance(message, Message):
+        await message.answer(display_text, reply_markup=final_keyboard, parse_mode="HTML")
+    else:
+        try:
+            await message.edit_text(display_text, reply_markup=final_keyboard, parse_mode="HTML")
+        except Exception:
+            await message.answer(display_text, reply_markup=final_keyboard, parse_mode="HTML")
 
 # ==========================================
 # 1. КНОПКА "📅 Моя программа" (Только просмотр)
@@ -59,7 +98,26 @@ async def show_saved_program(message: Message, session: AsyncSession, state: FSM
     if user.current_workout_program:
         try:
             saved_pages = json.loads(user.current_workout_program)
-            await show_workout_pages(message, state, saved_pages, from_db=True)
+            # 🔥 Достаем из базы список выполненных дней
+            from sqlalchemy import select
+            from database.models import WorkoutLog
+            
+            stmt = select(WorkoutLog.workout_type).where(WorkoutLog.user_id == message.from_user.id)
+            result = await session.execute(stmt)
+            logs = result.scalars().all() # Получим список типа ["День 1", "День 2"]
+            
+            # Превращаем названия в индексы страниц (0, 1, 2...)
+            completed_days = []
+            for log in logs:
+                try:
+                    # Извлекаем число из строки "День X" и вычитаем 1
+                    day_num = int(log.split(" ")[-1]) - 1
+                    completed_days.append(day_num)
+                except: continue
+            
+            # Сохраняем этот список в состояние (FSM)
+            await state.update_data(completed_days=completed_days)
+            await show_workout_pages(message, state, saved_pages, from_db=True, completed_days_direct=completed_days)
         except Exception as e:
             await message.answer("⚠️ Ошибка загрузки программы. Попробуйте создать новую.")
     else:
@@ -115,41 +173,40 @@ async def start_wishes_step(message: Message, state: FSMContext):
 
 # --- ИСПРАВЛЯЕМ ОБРАБОТЧИК ПОДТВЕРЖДЕНИЯ ---
 @router.callback_query(F.data == "confirm_new_workout")
-async def confirm_generation(callback: CallbackQuery, state: FSMContext):
+async def confirm_new_workout_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
-    # Теперь после нажатия "Да" переходим к сбору пожеланий
+    # Сразу переходим к шагу с пожеланиями
     await start_wishes_step(callback.message, state)
+    await callback.answer()
 
 # 2. ЭТА ФУНКЦИЯ ДОЛЖНА ИДТИ СЛЕДУЮЩЕЙ — она ловит ваш текст
 @router.message(WorkoutRequest.waiting_for_wishes)
 async def process_workout_wishes(message: Message, session: AsyncSession, state: FSMContext):
-    user_text = message.text
+    user_wishes = message.text
     
-    # Сразу очищаем состояние, чтобы бот вернулся в обычный режим
-    await state.clear() 
+    # Получаем старые данные, чтобы сохранить контекст
+    data = await state.get_data()
+    old_wishes = data.get("wishes", "")
     
-    if user_text == "⏩ Пропустить и составить обычную":
-        wishes = "Особых пожеланий нет."
+    # Объединяем старые пожелания с новыми
+    if old_wishes and user_wishes.lower() != "без изменений":
+        combined_wishes = f"{old_wishes}. Дополнительно: {user_wishes}"
     else:
-        wishes = user_text
+        combined_wishes = user_wishes
 
+    await state.update_data(wishes=combined_wishes)
     user = await UserCRUD.get_user(session, message.from_user.id)
     
-    # Убираем кнопку пропуска, возвращая главное меню
-    from keyboards.main_menu import get_main_menu
-    await message.answer(f"✅ Принято: <i>\"{wishes}\"</i>\nСоставляю план...", 
-                         reply_markup=get_main_menu(), 
-                         parse_mode="HTML")
-    
     # Запускаем саму генерацию
-    await generate_workout_process(message, session, user, state, wishes=wishes)
+    await generate_workout_process(message, session, user, state, wishes=combined_wishes)
 
 # --- ОБРАБОТЧИКИ ПОДТВЕРЖДЕНИЯ ---
 @router.callback_query(F.data == "confirm_new_workout")
-async def confirm_generation(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+async def confirm_new_workout_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
-    user = await UserCRUD.get_user(session, callback.from_user.id)
-    await generate_workout_process(callback.message, session, user, state)
+    # Сразу переходим к шагу с пожеланиями
+    await start_wishes_step(callback.message, state)
+    await callback.answer()
 
 @router.callback_query(F.data == "cancel_workout")
 async def cancel_generation(callback: CallbackQuery):
@@ -160,9 +217,15 @@ async def cancel_generation(callback: CallbackQuery):
 @router.callback_query(F.data == "regen_workout")
 @router.callback_query(F.data == "refresh_ai_workout")
 async def force_regen_workout(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    await callback.message.edit_text("🔄 Удаляю старую и создаю новую...")
-    user = await UserCRUD.get_user(session, callback.from_user.id)
-    await generate_workout_process(callback.message, session, user, state)
+    await state.set_state(WorkoutRequest.waiting_for_wishes)
+    
+    # Можно отправить новое сообщение или отредактировать старое
+    await callback.message.answer(
+        "📝 <b>Что добавить или изменить в новой программе?</b>\n\n"
+        "Например: <i>'убери приседания'</i>, <i>'сделай упор на плечи'</i> или просто напиши <i>'без изменений'</i>.",
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
 # --- ЛОГИКА ГЕНЕРАЦИИ (Service) ---
 async def generate_workout_process(message: Message, session: AsyncSession, user, state: FSMContext, wishes: str = None):
@@ -252,48 +315,56 @@ async def change_page(callback: CallbackQuery, state: FSMContext):
             return
             
         await state.update_data(current_page=target_page)
-
-        # Получаем стандартную клавиатуру пагинации
-        keyboard = get_pagination_kb(target_page, len(pages), page_type="workout")
-        
-        user_data = await state.get_data()
-        completed_days = user_data.get("completed_days", [])
-
-        if target_page < len(pages) - 1:
-            if target_page in completed_days:
-                btn_text = "🔄 Отменить выполнение"
-                btn_callback = f"workout_undo_{target_page}"
-            else:
-                btn_text = "✅ Тренировка выполнена"
-                btn_callback = "workout_done"
-                
-            keyboard.inline_keyboard.insert(0, [
-                InlineKeyboardButton(text=btn_text, callback_data=btn_callback)
-            ])
-        
-        # Проверяем, выполнена ли эта страница пользователем
         completed_days = data.get("completed_days", [])
-        
         page_text = pages[target_page]
-        if target_page in completed_days:
-            page_text += "\n\n🌟 <b>Эта тренировка выполнена!</b>"
+        
+        # Формируем клавиатуру
+        base_kb = get_pagination_kb(target_page, len(pages), page_type="workout")
+        
+        # Логика скрытия кнопки в дни отдыха
+        # Берем только самую первую строку (заголовок) для проверки
+        first_line = page_text.split('\n')[0].upper()
+        rest_keywords = ["ВОССТАНОВЛЕНИЕ", "ОТДЫХ", "ВЫХОДНОЙ"]
+        is_rest_day = any(word in first_line for word in rest_keywords)
+        is_advice_page = target_page == len(pages) - 1
 
-        # 🔥 ОДИН КОРРЕКТНЫЙ ВЫЗОВ ОБНОВЛЕНИЯ СООБЩЕНИЯ 🔥
+        # Собираем ряды кнопок безопасно
+        rows = []
+        if not is_rest_day and not is_advice_page:
+            if target_page in completed_days:
+                btn_text, btn_cb = "🔄 Отменить выполнение", f"workout_undo_{target_page}"
+            else:
+                btn_text, btn_cb = "✅ Тренировка выполнена", "workout_done"
+            rows.append([InlineKeyboardButton(text=btn_text, callback_data=btn_cb)])
+        
+        if base_kb and base_kb.inline_keyboard:
+            rows.extend(base_kb.inline_keyboard)
+        
+        final_keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+
+        # 🔥 ВОТ ЭТОГО НЕ ХВАТАЛО: Готовим текст перед отправкой
+        display_text = page_text
+        if target_page in completed_days:
+            display_text += "\n\n🌟 <b>Эта тренировка выполнена!</b>"
+
         await callback.message.edit_text(
-            text=page_text,
-            reply_markup=keyboard,
+            text=display_text,
+            reply_markup=final_keyboard,
             parse_mode=ParseMode.HTML
         )
-    except TelegramBadRequest:
         await callback.answer()
+
     except Exception as e:
-        logger.error(f"Ошибка пагинации: {e}")
-        await callback.answer()
+        print(f"Ошибка пагинации: {e}")
+        await callback.answer("Ошибка переключения")
 
 @router.callback_query(F.data == "noop")
 async def noop_btn(callback: CallbackQuery):
     await callback.answer()
 
+# ==========================================
+# 4. ВЫПОЛНЕНИЕ / ОТМЕНА ТРЕНИРОВКИ
+# ==========================================
 @router.callback_query(F.data == "workout_done")
 async def process_workout_done(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     data = await state.get_data()
@@ -317,21 +388,24 @@ async def process_workout_done(callback: CallbackQuery, session: AsyncSession, s
 
     await callback.answer("💪 Мощно! Тренировка засчитана!", show_alert=True)
     
-    # МГНОВЕННО ОБНОВЛЯЕМ КНОПКУ И ТЕКСТ
-    keyboard = get_pagination_kb(current_page, len(pages), page_type="workout")
-    keyboard.inline_keyboard.insert(0, [
-        InlineKeyboardButton(text="🔄 Отменить выполнение", callback_data=f"workout_undo_{current_page}")
-    ])
+    # МГНОВЕННО ОБНОВЛЯЕМ КНОПКУ (Безопасная сборка вместо .insert)
+    base_kb = get_pagination_kb(current_page, len(pages), page_type="workout")
+    rows = [[InlineKeyboardButton(text="🔄 Отменить выполнение", callback_data=f"workout_undo_{current_page}")]]
+    
+    if base_kb and base_kb.inline_keyboard:
+        rows.extend(base_kb.inline_keyboard)
+        
+    final_keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     
     try:
         page_text = pages[current_page] + "\n\n🌟 <b>Эта тренировка выполнена!</b>"
         await callback.message.edit_text(
             text=page_text,
-            reply_markup=keyboard,
+            reply_markup=final_keyboard,
             parse_mode=ParseMode.HTML
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Ошибка отметки выполнения: {e}")
 
 @router.callback_query(F.data.startswith("workout_undo_"))
 async def process_workout_undo(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
@@ -355,21 +429,80 @@ async def process_workout_undo(callback: CallbackQuery, session: AsyncSession, s
 
     await callback.answer("Выполнение отменено", show_alert=True)
 
-    # ВОЗВРАЩАЕМ КНОПКУ "ВЫПОЛНЕНО"
-    keyboard = get_pagination_kb(target_page, len(pages), page_type="workout")
-    keyboard.inline_keyboard.insert(0, [
-        InlineKeyboardButton(text="✅ Тренировка выполнена", callback_data="workout_done")
-    ])
+    # ВОЗВРАЩАЕМ КНОПКУ "ВЫПОЛНЕНО" (Безопасная сборка)
+    base_kb = get_pagination_kb(target_page, len(pages), page_type="workout")
+    page_text = pages[target_page]
+    # Берем только самую первую строку (заголовок) для проверки
+    first_line = page_text.split('\n')[0].upper()
+    rest_keywords = ["ВОССТАНОВЛЕНИЕ", "ОТДЫХ", "ВЫХОДНОЙ"]
+    is_rest_day = any(word in first_line for word in rest_keywords)
+    is_advice_page = target_page == len(pages) - 1
+
+    rows = []
+    if not is_rest_day and not is_advice_page:
+        rows.append([InlineKeyboardButton(text="✅ Тренировка выполнена", callback_data="workout_done")])
+            
+    if base_kb and base_kb.inline_keyboard:
+        rows.extend(base_kb.inline_keyboard)
+            
+    final_keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
 
     await callback.message.edit_text(
-        text=pages[target_page],
-        reply_markup=keyboard,
+        text=page_text,
+        reply_markup=final_keyboard,
         parse_mode=ParseMode.HTML
     )    
 
-# Добавь этот хендлер в конец файлов
+# ==========================================
+# 5. ПРОЧИЕ ХЕНДЛЕРЫ (Чат и Циклы)
+# ==========================================
 @router.callback_query(F.data == "ai_chat")
 async def redirect_to_chat(callback: CallbackQuery, state: FSMContext):
     from handlers.ai_chat import start_chat_logic
     await callback.answer()
     await start_chat_logic(callback.message, state)    
+
+@router.callback_query(F.data == "confirm_new_cycle")
+async def confirm_cycle_reset(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, обнулить историю", callback_data="execute_new_cycle")],
+        [InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_reset")]
+    ])
+    
+    await callback.message.edit_text(
+        "<b>Вы начинаете новый тренировочный цикл?</b>\n\n"
+        "Это удалит историю выполненных тренировок, чтобы ИИ мог составить "
+        "новый точный анализ твоего прогресса. Программа тренировок останется.\n\n"
+        "<i>Рекомендуется делать это раз в 4-8 недель.</i>",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "execute_new_cycle")
+async def execute_cycle_reset(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    user_id = callback.from_user.id
+    from sqlalchemy import delete
+    from database.models import WorkoutLog, WeightHistory
+    
+    await session.execute(delete(WorkoutLog).where(WorkoutLog.user_id == user_id))
+    await session.execute(delete(WeightHistory).where(WeightHistory.user_id == user_id))
+    
+    user = await UserCRUD.get_user(session, user_id)
+    if user and user.weight:
+        session.add(WeightHistory(user_id=user_id, weight=user.weight))
+    
+    await session.commit()
+    await state.update_data(completed_days=[])
+    
+    await callback.message.edit_text(
+        "🚀 <b>Новый цикл запущен!</b>\n\n"
+        "История тренировок и веса очищена. Теперь анализ будет строиться только на основе новых данных.",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "cancel_reset")
+async def cancel_reset_handler(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.answer("Сброс отменен")

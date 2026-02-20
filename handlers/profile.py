@@ -74,11 +74,15 @@ def get_profile_keyboard(user):
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
     
-    # Кнопка Premium появляется, если нет подписки или мало лимитов
+    # Кнопка Premium
     if not user.is_premium or (user.workout_limit is not None and user.workout_limit < 5):
         kb.row(InlineKeyboardButton(text="💎 Получить Premium / Пополнить", callback_data="buy_premium"))
         
     kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
+    
+    # 🔥 ВОТ ЭТУ СТРОКУ НУЖНО ДОБАВИТЬ:
+    kb.row(InlineKeyboardButton(text="🔄 Начать новый цикл", callback_data="confirm_new_cycle"))
+    
     return kb.as_markup()
 
 # --- 3. ПРОСМОТР ПРОФИЛЯ ---

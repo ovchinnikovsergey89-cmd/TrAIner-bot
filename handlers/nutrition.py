@@ -114,21 +114,16 @@ async def ask_nutrition_wishes(message: Message, state: FSMContext):
 
 @router.message(WorkoutRequest.waiting_for_nutrition_wishes)
 async def process_nutrition_wishes(message: Message, state: FSMContext, session: AsyncSession):
-    wishes = message.text
-    if wishes == "⏩ Пропустить (ем всё)":
-        wishes = "Нет особых предпочтений"
+    user_wishes = message.text
+    data = await state.get_data()
+    old_wishes = data.get("wishes", "")
     
-    # ✅ Добавляем подтверждение выбора (как в тренировках)
-    await message.answer(f"✅ <b>Принято:</b> \"{wishes}\"", parse_mode=ParseMode.HTML)
-    
-    # ⏳ Создаем исчезающее сообщение
-    from keyboards.main_menu import get_main_menu
-    status_msg = await message.answer(
-        "👨‍🍳 <b>Тренер составляет меню...</b>", 
-        reply_markup=get_main_menu(),
-        parse_mode=ParseMode.HTML
-    )
-    
+    if old_wishes and user_wishes.lower() != "без изменений":
+        combined_wishes = f"{old_wishes}. Дополнительно: {user_wishes}"
+    else:
+        combined_wishes = user_wishes
+
+    await state.update_data(wishes=combined_wishes)
     user = await UserCRUD.get_user(session, message.from_user.id)
     
     # Передаем status_msg в функцию генерации, чтобы потом его удалить
@@ -261,13 +256,25 @@ async def change_nutrition_page(callback: CallbackQuery, session: AsyncSession):
         print(f"Ошибка пагинации: {e}")
         await callback.answer()
 
-@router.callback_query(F.data == "regen_nutrition")
-async def force_regen_nutrition(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    try: await callback.message.edit_text("🔄 Тренер переделывает...")
-    except: await callback.message.answer("🔄 Тренер переделывает...")
+@router.message(WorkoutRequest.waiting_for_nutrition_wishes)
+async def process_nutrition_wishes(message: Message, state: FSMContext, session: AsyncSession):
+    user_wishes = message.text
+    data = await state.get_data()
+    old_wishes = data.get("wishes", "")
     
-    user = await UserCRUD.get_user(session, callback.from_user.id)
-    await generate_nutrition_process(callback.message, session, user, state)
+    if old_wishes and user_wishes.lower() != "без изменений":
+        combined_wishes = f"{old_wishes}. Дополнительно: {user_wishes}"
+    else:
+        combined_wishes = user_wishes
+
+    await state.update_data(wishes=combined_wishes)
+    user = await UserCRUD.get_user(session, message.from_user.id)
+    
+    # Создаем статусное сообщение
+    status_msg = await message.answer("👨‍🍳 <b>Тренер составляет меню...</b>", parse_mode="HTML")
+    
+    # Вызываем генерацию с правильной переменной combined_wishes
+    await generate_nutrition_process(message, session, user, state, wishes=combined_wishes, status_msg=status_msg)
 
 # --- ПОИСК РЕЦЕПТОВ ---
 @router.callback_query(F.data == "recipe_search")

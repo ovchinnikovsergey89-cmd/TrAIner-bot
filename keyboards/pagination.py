@@ -47,20 +47,23 @@ def get_pagination_kb(current_page: int, total_pages: int, page_type: str = "wor
         
     # 2. Если мы листаем ДНИ ТРЕНИРОВОК
     else:
+        # Индекс страницы с советами (всегда последняя)
+        advice_index = total_pages - 1
+        
         prev_page = current_page - 1
         next_page = current_page + 1
         
+        # Ряд переключения страниц
         # Стрелка влево
         if prev_page >= 0:
             builder.add(InlineKeyboardButton(text="⬅️", callback_data=f"workout_page_{prev_page}"))
         else:
             builder.add(InlineKeyboardButton(text="▪️", callback_data="noop"))
             
-        # Счетчик (показываем кол-во дней, исключая страницу советов)
-        display_total = total_pages - 1 if total_pages > 1 else 1
-        builder.add(InlineKeyboardButton(text=f"День {current_page + 1}/{display_total}", callback_data="noop"))
+        # Счетчик (теперь до 7 дней + советы)
+        builder.add(InlineKeyboardButton(text=f"День {current_page + 1}/{total_pages - 1}", callback_data="noop"))
         
-        # Стрелка вправо (не пускаем на страницу советов стрелкой)
+        # Стрелка вправо (не пускаем на советы через стрелки)
         if next_page < advice_index:
             builder.add(InlineKeyboardButton(text="➡️", callback_data=f"workout_page_{next_page}"))
         else:
