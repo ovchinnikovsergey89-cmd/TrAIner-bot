@@ -77,11 +77,6 @@ class UserCRUD:
 
     @staticmethod
     async def get_stats(session: AsyncSession):
-        total = await session.scalar(select(func.count(User.telegram_id)))
-        return {"total": total or 0}
-
-    @staticmethod
-    async def get_stats(session: AsyncSession):
         total = await session.scalar(select(func.count(User.telegram_id))) or 0
         
         active = await session.scalar(

@@ -110,25 +110,6 @@ async def ask_nutrition_wishes(message: Message, state: FSMContext):
     )
     await state.set_state(WorkoutRequest.waiting_for_nutrition_wishes)
 
-# 4. Хендлер, который принимает текст и запускает процесс
-
-@router.message(WorkoutRequest.waiting_for_nutrition_wishes)
-async def process_nutrition_wishes(message: Message, state: FSMContext, session: AsyncSession):
-    user_wishes = message.text
-    data = await state.get_data()
-    old_wishes = data.get("wishes", "")
-    
-    if old_wishes and user_wishes.lower() != "без изменений":
-        combined_wishes = f"{old_wishes}. Дополнительно: {user_wishes}"
-    else:
-        combined_wishes = user_wishes
-
-    await state.update_data(wishes=combined_wishes)
-    user = await UserCRUD.get_user(session, message.from_user.id)
-    
-    # Передаем status_msg в функцию генерации, чтобы потом его удалить
-    await generate_nutrition_process(message, session, user, state, wishes, status_msg)
-
 # 5. Сама генерация (добавлен аргумент wishes)
 async def generate_nutrition_process(message: Message, session: AsyncSession, user, state: FSMContext, wishes: str, status_msg: Message = None):
     # --- ЗАЩИТА ОТ СПАМА ---
