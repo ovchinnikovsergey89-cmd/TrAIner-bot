@@ -6,8 +6,10 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
 
 from database.crud import UserCRUD
+from database.models import WorkoutLog
 from states.user_states import EditForm
 from keyboards.main_menu import get_main_menu
 from keyboards.builders import (
@@ -34,8 +36,25 @@ ACTIVITY_MAP = {
     "moderate": "🏃 Средняя", "high": "🏋️ Высокая", "extreme": "🔥 Экстремальная"
 }
 
-# --- 1. ГЕНЕРАЦИЯ ТЕКСТА ---
-def get_profile_text(user):
+# --- 1. ГЕНЕРАЦИЯ КРАСИВОГО ТЕКСТА С РАНГОМ ---
+async def get_full_profile_text(user, session: AsyncSession) -> str:
+    # Считаем тренировки
+    stmt = select(func.count(WorkoutLog.id)).where(WorkoutLog.user_id == user.telegram_id)
+    result = await session.execute(stmt)
+    total_workouts = result.scalar() or 0
+
+    # Вычисляем ранг
+    if total_workouts < 3:
+        rank = "🌱 Новичок"
+    elif total_workouts < 10:
+        rank = "🥉 Любитель"
+    elif total_workouts < 30:
+        rank = "🥈 Опытный атлет"
+    elif total_workouts < 50:
+        rank = "🥇 Машина"
+    else:
+        rank = "👑 Киборг-убийца"
+
     txt_name = html.escape(user.name or "Атлет")
     txt_age = user.age or "-"
     txt_height = f"{user.height} см" if user.height else "-"
@@ -53,6 +72,9 @@ def get_profile_text(user):
     return (
         f"👤 <b>Профиль: {txt_name}</b>\n"
         f"──────────────────\n"
+        f"🏆 <b>Ранг:</b> {rank}\n"
+        f"💪 <b>Всего тренировок:</b> {total_workouts}\n"
+        f"──────────────────\n"
         f"🎂 <b>Возраст:</b> {txt_age} | {txt_gender}\n"
         f"📏 <b>Рост:</b> {txt_height} | ⚖️ <b>Вес:</b> {txt_weight}\n"
         f"──────────────────\n"
@@ -69,7 +91,7 @@ def get_profile_text(user):
         f"⏰ <b>Уведомления:</b> {txt_time}"
     )
 
-# --- 2. ГЕНЕРАЦИЯ КЛАВИАТУРЫ (Чтобы кнопка Premium не пропадала) ---
+# --- 2. ГЕНЕРАЦИЯ КЛАВИАТУРЫ ---
 def get_profile_keyboard(user):
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
@@ -79,8 +101,6 @@ def get_profile_keyboard(user):
         kb.row(InlineKeyboardButton(text="💎 Получить Premium / Пополнить", callback_data="buy_premium"))
         
     kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
-    
-    # 🔥 ВОТ ЭТУ СТРОКУ НУЖНО ДОБАВИТЬ:
     kb.row(InlineKeyboardButton(text="🔄 Начать новый цикл", callback_data="confirm_new_cycle"))
     
     return kb.as_markup()
@@ -94,9 +114,12 @@ async def show_profile_view(message: Message, session: AsyncSession, state: FSMC
     if not user:
         await message.answer("Сначала пройдите регистрацию: /start")
         return
+    
+    # Получаем красивый текст с рангом
+    text = await get_full_profile_text(user, session)
 
     await message.answer(
-        text=get_profile_text(user),
+        text=text, 
         reply_markup=get_profile_keyboard(user),
         parse_mode="HTML"
     )
@@ -111,7 +134,8 @@ async def show_edit_menu(event, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, user_id)
     if not user: return
 
-    text = get_profile_text(user) + "\n\n👇 <b>Выберите параметр для изменения:</b>"
+    base_text = await get_full_profile_text(user, session)
+    text = base_text + "\n\n👇 <b>Выберите параметр для изменения:</b>"
 
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="⚖️ Вес", callback_data="prof_weight"),
@@ -132,8 +156,10 @@ async def show_edit_menu(event, session: AsyncSession, state: FSMContext):
 @router.callback_query(F.data == "close_edit_menu")
 async def close_edit(callback: CallbackQuery, session: AsyncSession):
     user = await UserCRUD.get_user(session, callback.from_user.id)
+    text = await get_full_profile_text(user, session)
+    
     await callback.message.edit_text(
-        text=get_profile_text(user),
+        text=text,
         reply_markup=get_profile_keyboard(user),
         parse_mode="HTML"
     )
@@ -272,8 +298,10 @@ async def save_notif_time(callback: CallbackQuery, session: AsyncSession):
     await callback.answer(f"Время установлено: {hour}:00")
     
     user = await UserCRUD.get_user(session, callback.from_user.id)
+    text = await get_full_profile_text(user, session)
+    
     await callback.message.edit_text(
-        text=get_profile_text(user),
+        text=text,
         reply_markup=get_profile_keyboard(user),
         parse_mode="HTML"
     )

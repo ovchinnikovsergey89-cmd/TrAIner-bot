@@ -17,6 +17,7 @@ class User(Base):
     workout_level = Column(String, nullable=True)
     workout_days = Column(Integer, default=3)
     
+    
     # --- СИСТЕМА МОНЕТИЗАЦИИ ---
     is_premium = Column(Boolean, default=False) # Статус подписки
     workout_limit = Column(Integer, default=3)   # Бесплатные генерации (базово 3)

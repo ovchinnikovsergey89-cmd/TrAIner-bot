@@ -11,7 +11,8 @@ from sqlalchemy import select
 
 from handlers.admin import is_admin
 from database.crud import UserCRUD
-from database.models import WeightHistory
+# 🔥 ДОБАВИЛИ ИМПОРТ WorkoutLog
+from database.models import WeightHistory, WorkoutLog
 from services.ai_manager import AIManager
 from services.graph_service import GraphService
 from keyboards.main_menu import get_main_menu
@@ -57,10 +58,8 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
         current_time = datetime.now()
 
         if not is_admin(message.from_user.id):
-            # Проверка времени из базы
             if user.last_analysis_date:
                 last_date = user.last_analysis_date
-                # Конвертация, если SQLite вернул строку
                 if isinstance(last_date, str):
                     try:
                         last_date = datetime.strptime(last_date, '%Y-%m-%d %H:%M:%S.%f')
@@ -82,7 +81,6 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
                     await state.clear()
                     return
 
-            # Проверка недельного лимита
             if (user.workout_limit or 0) <= 0:
                 await message.answer("❌ У вас закончились бесплатные попытки анализа.")
                 await state.clear()
@@ -93,7 +91,6 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
         session.add(WeightHistory(user_id=user.telegram_id, weight=new_weight))
         await UserCRUD.update_user(session, user.telegram_id, weight=new_weight)
         
-        # Расчет разницы
         delta = new_weight - (old_weight_value if old_weight_value else new_weight)
         if delta < -0.1: trend = f"📉 <b>Минус {abs(delta):.1f} кг</b>"
         elif delta > 0.1: trend = f"📈 <b>Плюс {abs(delta):.1f} кг</b>"
@@ -102,12 +99,21 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
         temp_msg = await message.answer(f"{trend}\n⏱ <b>Сохраняю и строю график...</b>", parse_mode=ParseMode.HTML)
 
         # 5. ДАННЫЕ ДЛЯ ГРАФИКА И ИИ
+        # Выгружаем историю веса
         history_result = await session.execute(
             select(WeightHistory).where(WeightHistory.user_id == user.telegram_id).order_by(WeightHistory.date)
         )
         history_data = history_result.scalars().all()
+        
+        # 🔥 НОВОЕ: Выгружаем историю тренировок
+        workout_result = await session.execute(
+            select(WorkoutLog).where(WorkoutLog.user_id == user.telegram_id).order_by(WorkoutLog.date)
+        )
+        workout_data = workout_result.scalars().all()
+
         workouts_count = await UserCRUD.get_weekly_workouts_count(session, message.from_user.id)
 
+        # Анализ от ИИ
         ai = AIManager()
         ai_feedback = await ai.analyze_progress({
             "name": user.name,
@@ -116,11 +122,12 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
             "workout_days": user.workout_days
         }, new_weight, workouts_count)
 
+        # 🔥 Вызов НОВОГО метода для двойного графика
         graph_bytes = None
-        if history_data:
-            graph_buf = await GraphService.create_weight_graph(history_data)
+        if history_data or workout_data:
+            graph_buf = await GraphService.create_combined_dashboard(history_data, workout_data)
             if graph_buf:
-                graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="chart.png")
+                graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="dashboard.png")
 
         try: await temp_msg.delete()
         except: pass
@@ -133,11 +140,11 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
 
         # 6. ОТПРАВКА
         if graph_bytes:
-            await message.answer_photo(graph_bytes, caption=result_text, reply_markup=get_main_menu())
+            await message.answer_photo(graph_bytes, caption=result_text, reply_markup=get_main_menu(), parse_mode=ParseMode.HTML)
         else:
-            await message.answer(result_text, reply_markup=get_main_menu())
+            await message.answer(result_text, reply_markup=get_main_menu(), parse_mode=ParseMode.HTML)
 
-        # 7. СПИСАНИЕ ЛИМИТОВ (ТОЛЬКО ЮЗЕРАМ)
+        # 7. СПИСАНИЕ ЛИМИТОВ
         if not is_admin(message.from_user.id):
             if user.workout_limit and user.workout_limit > 0:
                 user.workout_limit -= 1
@@ -147,7 +154,6 @@ async def process_analysis(message: Message, state: FSMContext, session: AsyncSe
             try:
                 await session.flush()
                 await session.commit()
-                logger.info(f"Limits updated for user {user.telegram_id}")
             except Exception as e:
                 await session.rollback()
                 logger.error(f"DB Commit Error: {e}")
