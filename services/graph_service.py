@@ -7,7 +7,18 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import io
 import datetime
-from collections import Counter # Добавили для подсчета тренировок по дням
+import logging
+from collections import Counter
+
+# ==========================================
+# 🔥 УБИРАЕМ СПАМ ИЗ ЛОГОВ
+# ==========================================
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
+logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)
+logging.getLogger('matplotlib.pyplot').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+logging.getLogger('openai').setLevel(logging.WARNING)
 
 class GraphService:
     @staticmethod
@@ -43,7 +54,7 @@ class GraphService:
                 for x, y in zip(w_dates, weights):
                     ax1.annotate(f"{y}", xy=(x, y), xytext=(0, 5), textcoords="offset points", ha='center', weight='bold')
 
-                ax1.set_title('📉 Динамика изменения веса', fontsize=14, pad=10, weight='bold')
+                ax1.set_title('Динамика изменения веса', fontsize=14, pad=10, weight='bold')
                 ax1.set_ylabel('Вес (кг)', fontsize=12)
                 ax1.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
                 ax1.grid(True, linestyle='--', alpha=0.6)
@@ -52,7 +63,7 @@ class GraphService:
                 # Заглушка, если замеров веса пока не хватает
                 ax1.text(0.5, 0.5, "Недостаточно данных о весе\n(нужно минимум 2 замера)", 
                          ha='center', va='center', fontsize=12, color='gray')
-                ax1.set_title('📉 Динамика изменения веса', fontsize=14, pad=10, weight='bold')
+                ax1.set_title('Динамика изменения веса', fontsize=14, pad=10, weight='bold')
                 ax1.set_xticks([])
                 ax1.set_yticks([])
 
@@ -71,7 +82,7 @@ class GraphService:
                 ax2.bar(bar_dates, bar_counts, color='#3498db', alpha=0.8, width=0.4)
                 
                 # Настройка осей
-                ax2.set_title('💪 Выполненные тренировки', fontsize=14, pad=10, weight='bold')
+                ax2.set_title('Выполненные тренировки', fontsize=14, pad=10, weight='bold')
                 ax2.set_ylabel('Кол-во', fontsize=12)
                 
                 # Делаем шкалу Y целыми числами (1, 2, 3...)
@@ -84,14 +95,16 @@ class GraphService:
                 # Заглушка, если тренировок еще нет
                 ax2.text(0.5, 0.5, "Пока нет выполненных тренировок", 
                          ha='center', va='center', fontsize=12, color='gray')
-                ax2.set_title('💪 Выполненные тренировки', fontsize=14, pad=10, weight='bold')
+                ax2.set_title('Выполненные тренировки', fontsize=14, pad=10, weight='bold')
                 ax2.set_xticks([])
                 ax2.set_yticks([])
 
             # Поворачиваем даты по оси X на обоих графиках, чтобы они не слипались
             fig.autofmt_xdate()
 
-            fig.text(0.98, 0.02, 'Создано в TrAIner bot', 
+            # 🔥 НОВОЕ: Добавляем стильный водяной знак в правый нижний угол
+            # ЗАМЕНИ @TrAInerFitness_bot на реальный юзернейм своего бота
+            fig.text(0.98, 0.02, 'Создано в @TrAInerFitness_bot', 
                      ha='right', va='bottom', fontsize=10, color='gray', alpha=0.6, weight='bold')
 
             # ==========================================
