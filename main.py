@@ -11,7 +11,7 @@ from database.database import init_db, async_session
 
 # 👇 Убрали edit, так как он теперь часть profile.py
 # Добавили common и nutrition
-from handlers import start, help, profile, workout, nutrition, ai_workout, ai_chat, analysis, admin, common
+from handlers import start, help, profile, nutrition, ai_workout, ai_chat, analysis, admin, common
 from middlewares.db_middleware import DbSessionMiddleware
 from services.scheduler import send_morning_motivation
 
@@ -85,7 +85,6 @@ async def main():
         nutrition.router, # Питание
         start.router,     # Регистрация
         profile.router,   # Профиль и настройки
-        workout.router,   # Тренировки (старые)
         ai_chat.router,   # Чат с тренером
         help.router       # Помощь (в конце)
     )
