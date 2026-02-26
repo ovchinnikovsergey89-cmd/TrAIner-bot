@@ -6,10 +6,10 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, desc
 
 from database.crud import UserCRUD
-from database.models import WorkoutLog
+from database.models import WorkoutLog, ExerciseLog
 from states.user_states import EditForm
 from keyboards.main_menu import get_main_menu
 from keyboards.builders import (
@@ -99,7 +99,7 @@ def get_profile_keyboard(user):
     # Кнопка Premium
     if not user.is_premium or (user.workout_limit is not None and user.workout_limit < 5):
         kb.row(InlineKeyboardButton(text="💎 Получить Premium / Пополнить", callback_data="buy_premium"))
-        
+    kb.row(InlineKeyboardButton(text="📖 Дневник весов", callback_data="exercise_diary"))
     kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
     kb.row(InlineKeyboardButton(text="🔄 Начать новый цикл", callback_data="confirm_new_cycle"))
     
@@ -309,3 +309,47 @@ async def save_notif_time(callback: CallbackQuery, session: AsyncSession):
 @router.callback_query(F.data == "buy_premium")
 async def process_buy_premium(callback: CallbackQuery):
     await callback.answer("💳 Модуль оплаты будет доступен в следующем обновлении!", show_alert=True)
+
+# ==========================================
+# ДНЕВНИК РАБОЧИХ ВЕСОВ
+# ==========================================
+@router.callback_query(F.data == "exercise_diary")
+async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
+    user_id = callback.from_user.id
+    
+    # Достаем все записи пользователя, сортируем от новых к старым
+    stmt = select(ExerciseLog).where(ExerciseLog.user_id == user_id).order_by(desc(ExerciseLog.date))
+    result = await session.execute(stmt)
+    logs = result.scalars().all()
+    
+    if not logs:
+        await callback.answer("Твой дневник пока пуст! Записывай веса во время тренировок.", show_alert=True)
+        return
+        
+    # Оставляем только самую последнюю запись для каждого упражнения
+    latest_logs = {}
+    for log in logs:
+        # Название приводим к нижнему регистру для проверки, чтобы "Жим" и "жим" считались одним и тем же
+        name_key = log.exercise_name.lower().strip()
+        if name_key not in latest_logs:
+            latest_logs[name_key] = log
+            
+    # Формируем красивое сообщение
+    text = "📖 <b>Твой дневник рабочих весов:</b>\n\n"
+    
+    for log in latest_logs.values():
+        date_str = log.date.strftime("%d.%m") # Формат даты: 26.02
+        
+        # Убираем ".0", если вес целое число (например, 80.0 -> 80)
+        weight_display = int(log.weight) if log.weight.is_integer() else log.weight
+        
+        text += f"🏋️‍♂️ <b>{log.exercise_name.capitalize()}:</b> {weight_display} кг х {log.reps} <i>({date_str})</i>\n"
+        
+    text += "\n<i>💡 Чтобы обновить результат или исправить ошибку, просто запиши новый вес для этого упражнения на тренировке.</i>"
+    
+    # Кнопка возврата в профиль (используем уже готовую и надежную логику)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="close_edit_menu")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")    

@@ -2,6 +2,7 @@ import re
 import json
 import datetime
 import time
+from aiogram import Bot
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
@@ -18,7 +19,7 @@ from database.crud import UserCRUD
 from services.ai_manager import AIManager
 from states.workout_states import WorkoutPagination, WorkoutRequest
 from keyboards.pagination import get_pagination_kb
-from database.models import WorkoutLog
+from database.models import WorkoutLog, ExerciseLog
 
 router = Router()
 
@@ -61,7 +62,8 @@ async def show_workout_pages(message: Message, state: FSMContext, pages: list, f
         else:
             btn_text, btn_cb = "✅ Тренировка выполнена", "workout_done"
         rows.append([InlineKeyboardButton(text=btn_text, callback_data=btn_cb)])
-
+        # Добавляем кнопку записи веса отдельным рядом
+        rows.append([InlineKeyboardButton(text="📝 Записать рабочие веса", callback_data="log_weight_press")]) 
     # Добавляем остальные кнопки навигации
     if base_kb and base_kb.inline_keyboard:
         rows.extend(base_kb.inline_keyboard)
@@ -141,28 +143,70 @@ async def show_saved_program(message: Message, session: AsyncSession, state: FSM
             parse_mode=ParseMode.HTML
         )
 
-# --- КНОПКА "🤖 AI Тренировка" ---
+# ==========================================
+# 2. КНОПКА "🤖 AI Тренировка" (ВЫБОР ТИПА ТРЕНИРОВКИ)
+# ==========================================
 @router.message(F.text == "🤖 AI Тренировка")
 @router.message(Command("ai_workout"))
 async def request_ai_workout(message: Message, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, message.from_user.id)
     if not user or not user.workout_level:
-        await message.answer("❌ Сначала заполните профиль (/start)!", parse_mode=ParseMode.HTML)
+        await message.answer("❌ Сначала заполните профиль (/start)!")
         return
 
-    # Если программа уже есть — спрашиваем
+    # Создаем клавиатуру выбора типа тренировки
+    type_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗓 Недельная программа", callback_data="select_weekly_workout")],
+        [InlineKeyboardButton(text="⚡️ Разовая на сегодня", callback_data="select_quick_workout")]
+    ])
+    
+    await message.answer(
+        "<b>Какой формат тренировки тебе нужен?</b>\n\n"
+        "🗓 <b>Недельная:</b> Полноценный план на неделю.\n"
+        "⚡️ <b>Разовая:</b> Быстрая тренировка на сегодня под твои условия (инвентарь, время).",
+        reply_markup=type_kb,
+        parse_mode=ParseMode.HTML
+    )
+
+# --- ОБРАБОТЧИК: НЕДЕЛЬНАЯ ПРОГРАММА ---
+@router.callback_query(F.data == "select_weekly_workout")
+async def process_weekly_workout_selection(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    user = await UserCRUD.get_user(session, callback.from_user.id)
+    
+    # ПРОВЕРКА НАЛИЧИЯ СТАРОЙ ПРОГРАММЫ
     if user.current_workout_program:
         confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Да, создать новую", callback_data="confirm_new_workout")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_workout")]
         ])
-        await message.answer(
-            "⚠️ <b>Внимание!</b>\nУ тебя уже есть сохраненная программа. Если создать новую, старая удалится.\n\nПродолжить?",
+        await callback.message.edit_text(
+            "⚠️ <b>Внимание!</b>\nУ тебя уже есть сохраненная недельная программа. Если создать новую, старая удалится.\n\nПродолжить?",
             reply_markup=confirm_kb,
             parse_mode=ParseMode.HTML
         )
     else:
-        await start_wishes_step(message, state)
+        await callback.message.delete()
+        await start_wishes_step(callback.message, state)
+
+# --- ОБРАБОТЧИК: РАЗОВАЯ ТРЕНИРОВКА ---
+@router.callback_query(F.data == "select_quick_workout")
+async def process_quick_workout_selection(callback: CallbackQuery, state: FSMContext):
+    await callback.message.delete()
+    
+    kb = ReplyKeyboardBuilder()
+    kb.row(KeyboardButton(text="⏩ Составить без условий"))
+    
+    text = (
+        "⚡️ <b>Быстрая тренировка на лету!</b>\n\n"
+        "Где ты сейчас и что есть под рукой? Напиши мне:\n"
+        "<i>- 'Я дома, есть только 20 минут и гантели 5кг'\n"
+        "- 'Я на спортплощадке, хочу поработать на турниках'\n"
+        "- 'Я в зале, но болит поясница, дай легкое кардио'</i>\n\n"
+        "Или нажми кнопку ниже, чтобы получить стандартную тренировку с собственным весом."
+    )
+    
+    await callback.message.answer(text, reply_markup=kb.as_markup(resize_keyboard=True), parse_mode=ParseMode.HTML)
+    await state.set_state(WorkoutRequest.waiting_for_quick_workout_wishes)
 
 # --- ЛОГИКА ПОДТВЕРЖДЕНИЯ И ПОЖЕЛАНИЙ ---
 @router.callback_query(F.data == "confirm_new_workout")
@@ -265,6 +309,90 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
     except Exception as e:
         await loading_msg.edit_text(f"Ошибка: {e}")
 
+# --- ЛОГИКА ГЕНЕРАЦИИ РАЗОВОЙ ТРЕНИРОВКИ ---
+@router.message(WorkoutRequest.waiting_for_quick_workout_wishes)
+async def process_quick_workout_wishes(message: Message, session: AsyncSession, state: FSMContext):
+    user_wishes = message.text
+    if user_wishes == "⏩ Составить без условий":
+        user_wishes = "Стандартная тренировка с собственным весом на 30-40 минут."
+        
+    user = await UserCRUD.get_user(session, message.from_user.id)
+
+    # --- 1. ЗАЩИТА ОТ СПАМА (Раз в 1 минуту) ---
+    user_data_fsm = await state.get_data()
+    last_gen_time = user_data_fsm.get("last_quick_workout_gen_time", 0)
+    current_time = time.time()
+    
+    # Если прошло меньше 60 секунд И это НЕ админ
+    if current_time - last_gen_time < 60 and not is_admin(message.from_user.id):
+        wait_time = int(60 - (current_time - last_gen_time))
+        await message.answer(f"⏳ <b>Подожди {wait_time} сек.</b>\nДай тренеру перевести дух.")
+        return
+        
+    # Обновляем время последней генерации
+    await state.update_data(last_quick_workout_gen_time=current_time)
+
+    # --- 2. ПРОВЕРКА ЛИМИТОВ ---
+    if not is_admin(message.from_user.id) and user.workout_limit <= 0:
+        await message.answer(
+            "🚀 <b>Упс! Попытки закончились</b>\n\n"
+            "Вы использовали все бесплатные генерации.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Получить Premium", callback_data="buy_premium")]]),
+            parse_mode="HTML"
+        )
+        return
+    
+    # Проверка лимитов и защита от спама такая же, как в generate_workout_process
+    # (для экономии места в инструкции я не дублирую её, но ты можешь скопировать логику из generate_workout_process)
+
+    loading_msg = await message.answer("⚡️ <b>Тренер составляет быструю тренировку...</b>", parse_mode=ParseMode.HTML)
+    
+    try:
+        user_data = {
+            "goal": user.goal,
+            "gender": user.gender,
+            "weight": user.weight,
+            "age": user.age,
+            "workout_level": user.workout_level,
+            "name": user.name,
+            "wishes": user_wishes 
+        }
+        
+        ai_service = AIManager()
+        # Создадим новый метод в AIManager для разовой тренировки
+        workout_text = await ai_service.generate_single_workout(user_data) 
+        
+        if not workout_text or "Ошибка" in workout_text:
+            await loading_msg.edit_text("❌ Ошибка генерации. Попробуйте позже.")
+            return
+
+        cleaned_text = clean_text(workout_text)
+        
+        # Для разовой тренировки не используем пагинацию, просто отправляем текст
+        # И списываем 1 лимит
+        user.workout_limit -= 1
+        await session.commit()
+        
+        await loading_msg.delete()
+        
+        # Отправляем тренировку с кнопкой для возврата
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Выполнил!", callback_data="quick_workout_done")]
+        ])
+        await message.answer(f"⚡️ <b>Твоя разовая тренировка:</b>\n\n{cleaned_text}", reply_markup=kb, parse_mode=ParseMode.HTML)
+        
+        # Сбрасываем состояние
+        await state.clear()
+        
+    except Exception as e:
+        await loading_msg.edit_text(f"Ошибка: {e}")
+
+@router.callback_query(F.data == "quick_workout_done")
+async def process_quick_workout_done(callback: CallbackQuery):
+    # Убираем кнопку и поздравляем
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("🔥 Отличная работа! Тренировка засчитана.", show_alert=True)        
+
 # ==========================================
 # 4. ЛИСТАЛКА (ПАГИНАЦИЯ)
 # ==========================================
@@ -302,7 +430,8 @@ async def change_page(callback: CallbackQuery, state: FSMContext):
             else:
                 btn_text, btn_cb = "✅ Тренировка выполнена", "workout_done"
             rows.append([InlineKeyboardButton(text=btn_text, callback_data=btn_cb)])
-        
+            # Добавляем кнопку записи веса отдельным рядом
+            rows.append([InlineKeyboardButton(text="📝 Записать рабочие веса", callback_data="log_weight_press")])
         if base_kb and base_kb.inline_keyboard:
             rows.extend(base_kb.inline_keyboard)
         
@@ -471,3 +600,114 @@ async def execute_cycle_reset(callback: CallbackQuery, session: AsyncSession, st
 async def cancel_reset_handler(callback: CallbackQuery):
     await callback.message.delete()
     await callback.answer("Сброс отменен")
+
+# ==========================================
+# 7. ЗАПИСЬ РАБОЧИХ ВЕСОВ В УПРАЖНЕНИЯХ
+# ==========================================
+@router.callback_query(F.data == "log_weight_press")
+async def start_log_exercise(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        "📝 <b>Дневник тренировок</b>\n\n"
+        "Напиши название упражнения, вес и количество повторений.\n"
+        "<i>Например: Жим штанги лежа 80 10\n"
+        "Или: Подтягивания 0 12</i>",
+        parse_mode="HTML"
+    )
+    await state.set_state(WorkoutRequest.waiting_for_weights)
+    await callback.answer()
+
+@router.message(WorkoutRequest.waiting_for_weights)
+@router.message(WorkoutRequest.waiting_for_weights, F.voice)
+async def process_voice_exercise_log(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
+    status_msg = await message.answer("🎧 <i>Слушаю твои результаты...</i>", parse_mode="HTML")
+    
+    try:
+        # 1. Скачиваем аудио из Telegram
+        voice_file_info = await bot.get_file(message.voice.file_id)
+        voice_bytes = await bot.download_file(voice_file_info.file_path)
+        
+        # 2. Распознаем текст через Groq (Whisper)
+        manager = AIManager()
+        recognized_text = await manager.transcribe_voice(voice_bytes)
+        
+        if not recognized_text:
+            await status_msg.edit_text("❌ Не удалось расслышать. Попробуй говорить четче.")
+            return
+            
+        await status_msg.edit_text(f"🗣 <i>«{recognized_text}»</i>\n\n🤔 <i>Раскладываю по полочкам...</i>", parse_mode="HTML")
+        
+        # 3. Отправляем скрытый промпт в DeepSeek для парсинга
+        parse_prompt = (
+            "Ты парсер данных. Пользователь надиктовал результаты упражнения.\n"
+            "Вытащи название, вес и повторения.\n"
+            "СТРОГОЕ ПРАВИЛО: Верни только одну строку в формате 'Название | Вес | Повторения'.\n"
+            "Если вес не назван (например, подтягивания), пиши 0. Никаких других слов и пояснений.\n"
+            f"Текст: {recognized_text}"
+        )
+        
+        parsed_text = await manager.get_chat_response([{"role": "user", "content": parse_prompt}], {})
+        
+        # 4. Сохраняем в базу данных
+        parts = parsed_text.split('|')
+        if len(parts) != 3:
+            raise ValueError("Неверный формат от ИИ")
+            
+        name = parts[0].strip().capitalize()
+        weight = float(parts[1].strip().replace(',', '.'))
+        reps = int(parts[2].strip())
+        
+        new_log = ExerciseLog(
+            user_id=message.from_user.id,
+            exercise_name=name,
+            weight=weight,
+            reps=reps
+        )
+        session.add(new_log)
+        await session.commit()
+        
+        await status_msg.edit_text(
+            f"✨ <b>Сохранено ИИ-ассистентом:</b>\n"
+            f"🏋️‍♂️ {name} — {weight} кг на {reps} повт.", 
+            parse_mode="HTML"
+        )
+        
+        # Возвращаем пользователя в режим листания тренировки
+        await state.set_state(WorkoutPagination.active)
+        
+    except Exception as e:
+        print(f"Ошибка голосового ввода веса: {e}")
+        await status_msg.edit_text("❌ ИИ не смог уверенно разобрать цифры. Пожалуйста, напиши текстом (например: Жим 80 10).")
+async def process_exercise_log(message: Message, session: AsyncSession, state: FSMContext):
+    try:
+        # Разбиваем текст с конца (отделяем вес и повторы от названия)
+        # Например: "Жим гантелей сидя 30 12" -> name="Жим гантелей сидя", weight=30, reps=12
+        parts = message.text.rsplit(' ', 2)
+        if len(parts) < 3:
+            raise ValueError("Мало данных")
+            
+        name = parts[0].strip()
+        weight = float(parts[1].replace(',', '.')) # Заменяем запятую на точку, если ввели 12,5
+        reps = int(parts[2])
+
+        new_log = ExerciseLog(
+            user_id=message.from_user.id,
+            exercise_name=name,
+            weight=weight,
+            reps=reps
+        )
+        session.add(new_log)
+        await session.commit()
+        
+        await message.answer(f"✅ <b>Записано:</b>\n{name} — {weight} кг на {reps} повторений.", parse_mode="HTML")
+        
+        # Возвращаем пользователя в обычный режим (выходим из ожидания текста)
+        await state.set_state(WorkoutPagination.active) 
+        
+    except Exception:
+        await message.answer(
+            "❌ <b>Ошибка формата!</b>\n"
+            "Пожалуйста, напиши строго 3 параметра: <b>Название Вес Повторы</b>\n"
+            "<i>Пример: Присед 100 8</i>\n\n"
+            "Попробуй еще раз:",
+            parse_mode="HTML"
+        )    

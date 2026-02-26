@@ -1,3 +1,6 @@
+from groq import AsyncGroq
+from config import Config
+import io
 import logging
 import datetime
 import re
@@ -161,6 +164,40 @@ class AIManager:
             return self._smart_split(r.choices[0].message.content)
         except Exception:
             return ["❌ Ошибка при составлении программы."]
+        
+    # --- НОВОЕ: ГЕНЕРАЦИЯ РАЗОВОЙ ТРЕНИРОВКИ ---
+    async def generate_single_workout(self, user_data: dict) -> str:
+        if not self.client: return "❌ Ошибка API"
+        
+        level = user_data.get('workout_level', 'beginner')
+        goal = user_data.get('goal', 'maintenance')
+        wishes = user_data.get('wishes', 'Стандартная тренировка')
+
+        user_prompt = f"""
+        СОСТАВЬ ОДНУ РАЗОВУЮ ТРЕНИРОВКУ.
+        
+        АНКЕТА: Имя: {user_data.get('name')}, Пол: {user_data.get('gender')}, Возраст: {user_data.get('age')}, Вес: {user_data.get('weight')} кг, Цель: {goal}, Уровень: {level}.
+        УСЛОВИЯ/ПОЖЕЛАНИЯ СЕГОДНЯ: {wishes}
+
+        ЗАДАЧА: Напиши одну конкретную тренировку, строго подстроенную под пожелания клиента (инвентарь, время, ограничения).
+        
+        СТРОГИЕ ПРАВИЛА:
+        1. Сразу начинай с программы. Никаких "Привет, вот твоя тренировка".
+        2. Формат:
+        <b>[Номер]. [Название]</b>
+        <i>[Сеты] х [Повторы] (Отдых [сек])</i>
+        Техника: [Короткий совет]
+        3. В конце дай один мотивирующий совет.
+        """
+        try:
+            r = await self.client.chat.completions.create(
+                messages=[{"role": "user", "content": user_prompt}], 
+                model=self.model, temperature=0.5,
+                timeout=60.0
+            )
+            return r.choices[0].message.content
+        except Exception:
+            return "❌ Ошибка при составлении тренировки."    
 
     # --- 3. ГЕНЕРАЦИЯ ПИТАНИЯ (3 ВАРИАНТА + ПЕРЕКУСЫ + СПИСОК) ---
     async def generate_nutrition_pages(self, user_data: dict) -> list[str]:
@@ -274,3 +311,23 @@ class AIManager:
         except Exception as e:
             logger.error(f"DeepSeek Error: {e}")
             return f"Ошибка связи с ИИ: {str(e)}"
+        
+    # --- НОВОЕ: РАСПОЗНАВАНИЕ ГОЛОСА (STT) ---
+    async def transcribe_voice(self, voice_bytes: io.BytesIO) -> str:
+        try:
+            # Используем Groq для сверхбыстрого распознавания речи
+            groq_client = AsyncGroq(api_key=Config.GROQ_API_KEY)
+            
+            # Whisper требует, чтобы у файла было имя с расширением
+            voice_bytes.name = "voice.ogg" 
+            
+            transcription = await groq_client.audio.transcriptions.create(
+                file=voice_bytes,
+                model="whisper-large-v3",
+                language="ru", # Подсказываем, что язык русский
+                response_format="json"
+            )
+            return transcription.text
+        except Exception as e:
+            print(f"Ошибка распознавания голоса: {e}")
+            return ""    

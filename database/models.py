@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func, ForeignKey, Boolean  # <-- Добавь Boolean сюда
+from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func, ForeignKey, Boolean, Float  # <-- Добавь Boolean сюда
 from sqlalchemy.orm import relationship
 from database.database import Base
 import datetime 
@@ -52,3 +52,13 @@ class WeightHistory(Base):
     date = Column(DateTime, default=func.now())
     
     user = relationship("User", back_populates="weight_history")
+
+class ExerciseLog(Base):
+    __tablename__ = "exercise_logs"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.telegram_id"), nullable=False)
+    exercise_name = Column(String, nullable=False)
+    weight = Column(Float, nullable=False)
+    reps = Column(Integer, nullable=False)
+    date = Column(DateTime, default=datetime.datetime.now)    
