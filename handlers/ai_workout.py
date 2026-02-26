@@ -583,6 +583,8 @@ async def confirm_cycle_reset(callback: CallbackQuery):
 async def execute_cycle_reset(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     user_id = callback.from_user.id
     await session.execute(delete(WorkoutLog).where(WorkoutLog.user_id == user_id))
+    # 2. 🔥 НОВОЕ: Удаляем историю рабочих весов в упражнениях
+    await session.execute(delete(ExerciseLog).where(ExerciseLog.user_id == user_id))
     from database.models import WeightHistory
     await session.execute(delete(WeightHistory).where(WeightHistory.user_id == user_id))
     
@@ -619,6 +621,14 @@ async def start_log_exercise(callback: CallbackQuery, state: FSMContext):
 @router.message(WorkoutRequest.waiting_for_weights)
 @router.message(WorkoutRequest.waiting_for_weights, F.voice)
 async def process_voice_exercise_log(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
+    user = await UserCRUD.get_user(session, message.from_user.id)
+    is_admin_user = is_admin(message.from_user.id)
+
+    # --- 🛡 ПРОВЕРКА ЛИМИТА ВОПРОСОВ ---
+    if not is_admin_user and (user.chat_limit or 0) <= 0:
+        await message.answer("🚀 <b>Лимит ИИ-запросов на сегодня исчерпан!</b>\nПожалуйста, введи данные текстом или дождись обновления лимитов.", parse_mode="HTML")
+        return
+    # ----------------------------------
     status_msg = await message.answer("🎧 <i>Слушаю твои результаты...</i>", parse_mode="HTML")
     
     try:
