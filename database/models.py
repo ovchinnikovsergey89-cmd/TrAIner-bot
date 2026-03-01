@@ -19,10 +19,13 @@ class User(Base):
     
     
     # --- СИСТЕМА МОНЕТИЗАЦИИ ---
-    is_premium = Column(Boolean, default=False) # Статус подписки
-    workout_limit = Column(Integer, default=3)   # Бесплатные генерации (базово 3)
+    is_premium = Column(Boolean, default=False)  # Оставим для обратной совместимости или админов
+    sub_level = Column(Integer, default=0)       # 0 - Free, 1 - Base, 2 - Pro, 3 - Elite
+    sub_end_date = Column(DateTime, nullable=True) # Дата окончания подписки
+    
+    workout_limit = Column(Integer, default=3)   # Бесплатные генерации
+    chat_limit = Column(Integer, default=5)      # Бесплатные вопросы AI
     last_analysis_date = Column(DateTime, nullable=True)
-    chat_limit = Column(Integer, default=5)      # Бесплатные вопросы (базово 5)
     # ---------------------------
 
     notification_time = Column(Integer, default=8)
@@ -62,3 +65,20 @@ class ExerciseLog(Base):
     weight = Column(Float, nullable=False)
     reps = Column(Integer, nullable=False)
     date = Column(DateTime, default=datetime.datetime.now)    
+
+class NutritionLog(Base):
+    __tablename__ = 'nutrition_logs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"))
+    meal_type = Column(String, default="Перекус") # <-- ДОБАВИТЬ ЭТУ СТРОКУ
+    product_name = Column(String, nullable=False)
+    weight = Column(Float, default=0.0)
+    
+    # КБЖУ
+    calories = Column(Float, default=0.0)
+    protein = Column(Float, default=0.0)
+    fat = Column(Float, default=0.0)
+    carbs = Column(Float, default=0.0)
+    
+    date = Column(DateTime, default=func.now())    

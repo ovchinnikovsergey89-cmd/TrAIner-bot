@@ -45,18 +45,19 @@ async def process_voice_message(message: Message, session: AsyncSession, state: 
     user = await UserCRUD.get_user(session, message.from_user.id)
     is_admin_user = is_admin(message.from_user.id)
     
-    # 1. ПРОВЕРКА НА PREMIUM
-    if not is_admin_user and not user.is_premium:
+    # ПРОВЕРКА НА PRO ТАРИФ (уровень 2 и выше)
+    if not is_admin_user and user.sub_level < 2:
         premium_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Узнать про Premium", callback_data="buy_premium")]
+            [InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]
         ])
         await message.answer(
-            "🎙 <b>Голосовой помощник — это Premium функция!</b>\n\n"
-            "Оформи подписку, чтобы общаться с ИИ-тренером голосовыми сообщениями (он понимает даже шепот во время подхода).",
+            "🎙 <b>Голосовой помощник — это функция тарифа Pro!</b>\n\n"
+            "Оформи подписку уровня Pro или Elite, чтобы общаться с ИИ-тренером голосом.",
             reply_markup=premium_kb,
             parse_mode="HTML"
         )
         return
+    # ... дальше идет старый код загрузки войса ...
 
     # 2. ПРОВЕРКА ЛИМИТОВ (если у Premium тоже есть лимиты, или убираем, если безлимит)
     if not is_admin_user and (user.chat_limit or 0) <= 0:

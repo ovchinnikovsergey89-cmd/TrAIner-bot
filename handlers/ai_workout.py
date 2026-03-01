@@ -5,7 +5,7 @@ import time
 from aiogram import Bot
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
@@ -608,21 +608,49 @@ async def cancel_reset_handler(callback: CallbackQuery):
 # ==========================================
 @router.callback_query(F.data == "log_weight_press")
 async def start_log_exercise(callback: CallbackQuery, state: FSMContext):
+    # Создаем клавиатуру с кнопкой "Завершить запись"
+    kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🔙 Завершить запись")]],
+        resize_keyboard=True,
+        one_time_keyboard=False # Кнопка будет висеть, пока не нажмешь
+    )
     await callback.message.answer(
         "📝 <b>Дневник тренировок</b>\n\n"
         "Напиши название упражнения, вес и количество повторений.\n"
         "<i>Например: Жим штанги лежа 80 10\n"
-        "Или: Подтягивания 0 12</i>",
+        "- Подтягивания 0 12</i>\n"
+        "<b>Или: Запиши голосовое сообщение, со своими результатами.</b>",
+        reply_markup=kb,
         parse_mode="HTML"
     )
     await state.set_state(WorkoutRequest.waiting_for_weights)
     await callback.answer()
 
-@router.message(WorkoutRequest.waiting_for_weights)
+@router.message(WorkoutRequest.waiting_for_weights, F.text == "🔙 Завершить запись")
+async def exit_log_exercise(message: Message, state: FSMContext):
+    # Добавляем этот импорт здесь:
+    from keyboards.main_menu import get_main_menu
+    # Возвращаем главное меню вниз
+    await message.answer("✅ <b>Запись весов завершена.</b>", reply_markup=get_main_menu(), parse_mode="HTML")
+    
+    # Возвращаем состояние пагинации
+    await state.set_state(WorkoutPagination.active)
+    
+    # Заново отрисовываем текущую страницу тренировки, чтобы было удобно
+    data = await state.get_data()
+    pages = data.get("workout_pages")
+    if pages:
+        await show_workout_pages(message, state, pages, from_db=True)
+
 @router.message(WorkoutRequest.waiting_for_weights, F.voice)
 async def process_voice_exercise_log(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
     user = await UserCRUD.get_user(session, message.from_user.id)
     is_admin_user = is_admin(message.from_user.id)
+    # --- 🛡 ПРОВЕРКА ТАРИФА PRO ---
+    if not is_admin_user and (user.sub_level or 0) < 2:
+        await message.answer("🎙 <b>Голосовой ввод рабочих весов доступен с тарифа Pro!</b>\nВведи данные текстом (например: Жим 80 10) или улучши тариф.", parse_mode="HTML")
+        return
+    # ----------------------------------
 
     # --- 🛡 ПРОВЕРКА ЛИМИТА ВОПРОСОВ ---
     if not is_admin_user and (user.chat_limit or 0) <= 0:
@@ -646,47 +674,58 @@ async def process_voice_exercise_log(message: Message, session: AsyncSession, st
             
         await status_msg.edit_text(f"🗣 <i>«{recognized_text}»</i>\n\n🤔 <i>Раскладываю по полочкам...</i>", parse_mode="HTML")
         
-        # 3. Отправляем скрытый промпт в DeepSeek для парсинга
+        # ... (код распознавания текста остается прежним)
+        
+        # 3. НОВЫЙ ПРОМПТ: Просим ИИ вернуть список упражнений
         parse_prompt = (
-            "Ты парсер данных. Пользователь надиктовал результаты упражнения.\n"
-            "Вытащи название, вес и повторения.\n"
-            "СТРОГОЕ ПРАВИЛО: Верни только одну строку в формате 'Название | Вес | Повторения'.\n"
-            "Если вес не назван (например, подтягивания), пиши 0. Никаких других слов и пояснений.\n"
+            "Ты — парсер спортивных данных. Пользователь надиктовал результаты одного или нескольких упражнений.\n"
+            "Вытащи название, вес и повторения для КАЖДОГО упомянутого упражнения.\n"
+            "СТРОГОЕ ПРАВИЛО: Верни результат в формате списка, где каждая строка: 'Название | Вес | Повторения'.\n"
+            "Каждое новое упражнение — с новой строки. Если вес не назван, ставь 0. Никаких лишних слов.\n"
             f"Текст: {recognized_text}"
         )
         
-        parsed_text = await manager.get_chat_response([{"role": "user", "content": parse_prompt}], {})
+        parsed_response = await manager.get_chat_response([{"role": "user", "content": parse_prompt}], {})
         
-        # 4. Сохраняем в базу данных
-        parts = parsed_text.split('|')
-        if len(parts) != 3:
-            raise ValueError("Неверный формат от ИИ")
-            
-        name = parts[0].strip().capitalize()
-        weight = float(parts[1].strip().replace(',', '.'))
-        reps = int(parts[2].strip())
+        # 4. ЦИКЛ СОХРАНЕНИЯ: Обрабатываем каждую строку от ИИ
+        lines = parsed_response.strip().split('\n')
+        saved_exercises = []
+
+        for line in lines:
+            if '|' not in line: continue
+            parts = line.split('|')
+            if len(parts) == 3:
+                name = parts[0].strip().capitalize()
+                try:
+                    weight = float(parts[1].strip().replace(',', '.'))
+                    reps = int(parts[2].strip())
+                    
+                    new_log = ExerciseLog(
+                        user_id=message.from_user.id,
+                        exercise_name=name,
+                        weight=weight,
+                        reps=reps
+                    )
+                    session.add(new_log)
+                    saved_exercises.append(f"✅ {name}: {weight}кг x {reps}")
+                except: continue
         
-        new_log = ExerciseLog(
-            user_id=message.from_user.id,
-            exercise_name=name,
-            weight=weight,
-            reps=reps
-        )
-        session.add(new_log)
         await session.commit()
         
-        await status_msg.edit_text(
-            f"✨ <b>Сохранено ИИ-ассистентом:</b>\n"
-            f"🏋️‍♂️ {name} — {weight} кг на {reps} повт.", 
-            parse_mode="HTML"
-        )
+        # Красивый отчет пользователю
+        result_text = "✨ <b>Сохранено в дневник:</b>\n" + "\n".join(saved_exercises)
+        result_text += "\n\n<i>🎤 Жду следующее или нажми «Завершить»</i>"
+        
+        await status_msg.edit_text(result_text, parse_mode="HTML")
         
         # Возвращаем пользователя в режим листания тренировки
-        await state.set_state(WorkoutPagination.active)
+        # await state.set_state(WorkoutPagination.active)
         
     except Exception as e:
         print(f"Ошибка голосового ввода веса: {e}")
         await status_msg.edit_text("❌ ИИ не смог уверенно разобрать цифры. Пожалуйста, напиши текстом (например: Жим 80 10).")
+
+@router.message(WorkoutRequest.waiting_for_weights, F.text)
 async def process_exercise_log(message: Message, session: AsyncSession, state: FSMContext):
     try:
         # Разбиваем текст с конца (отделяем вес и повторы от названия)
@@ -708,10 +747,14 @@ async def process_exercise_log(message: Message, session: AsyncSession, state: F
         session.add(new_log)
         await session.commit()
         
-        await message.answer(f"✅ <b>Записано:</b>\n{name} — {weight} кг на {reps} повторений.", parse_mode="HTML")
+        await message.answer(
+            f"✅ <b>Записано:</b>\n{name} — {weight} кг на {reps} повторений.\n"
+            f"<i>✍️ Пиши/диктуй следующее или нажми «Завершить запись»</i>", 
+            parse_mode="HTML"
+        )
         
         # Возвращаем пользователя в обычный режим (выходим из ожидания текста)
-        await state.set_state(WorkoutPagination.active) 
+        # await state.set_state(WorkoutPagination.active) 
         
     except Exception:
         await message.answer(

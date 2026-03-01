@@ -13,7 +13,7 @@ from database.database import init_db, async_session
 # Добавили common и nutrition
 from handlers import start, help, profile, nutrition, ai_workout, ai_chat, analysis, admin, common
 from middlewares.db_middleware import DbSessionMiddleware
-from services.scheduler import send_morning_motivation
+from services.scheduler import send_morning_motivation, reset_daily_limits
 
 # 1. Основная настройка (оставляем INFO, чтобы видеть твои ракеты и галочки)
 logging.basicConfig(
@@ -73,6 +73,16 @@ async def main():
         minute=0, # Каждые 00 минут каждого часа (0:00, 1:00 ... 23:00)
         kwargs={'bot': bot, 'session_pool': async_session}
     )
+
+    # НОВОЕ: Сброс лимитов ровно в 00:00
+    scheduler.add_job(
+        reset_daily_limits,
+        trigger='cron',
+        hour=0,
+        minute=0,
+        kwargs={'session_pool': async_session}
+    )
+
     scheduler.start()
     logger.info("⏰ Планировщик запущен (Проверка каждый час)")
 

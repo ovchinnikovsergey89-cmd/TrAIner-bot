@@ -67,7 +67,10 @@ async def get_full_profile_text(user, session: AsyncSession) -> str:
     txt_days = f"{user.workout_days} дн/нед" if user.workout_days else "-"
     
     txt_time = f"{user.notification_time}:00" if user.notification_time is not None else "Откл"
-    status = "🌟 <b>Premium</b>" if user.is_premium else "🆓 <b>Бесплатный</b>"
+    sub_names = {0: "🆓 Free", 1: "🥉 Base", 2: "🥈 Pro", 3: "🥇 Elite"}
+    status = sub_names.get(user.sub_level, "🆓 Free")
+    if user.sub_end_date:
+        status += f" (до {user.sub_end_date.strftime('%d.%m.%y')})"
     
     return (
         f"👤 <b>Профиль: {txt_name}</b>\n"
@@ -316,6 +319,13 @@ async def process_buy_premium(callback: CallbackQuery):
 @router.callback_query(F.data == "exercise_diary")
 async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     user_id = callback.from_user.id
+    user = await UserCRUD.get_user(session, user_id)
+    
+    from handlers.admin import is_admin
+    if not is_admin(user_id) and (user.sub_level or 0) < 2:
+        await callback.answer("📖 Дневник рабочих весов доступен только на тарифах Pro и Elite!", show_alert=True)
+        return
+    # ... старый код вывода дневника ...
     
     # Достаем все записи пользователя, сортируем от новых к старым
     stmt = select(ExerciseLog).where(ExerciseLog.user_id == user_id).order_by(desc(ExerciseLog.date))
