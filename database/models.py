@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func, ForeignKey, Boolean, Float  # <-- Добавь Boolean сюда
+from sqlalchemy import BigInteger, String, Float, Integer, Column, DateTime, func, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 from database.database import Base
 import datetime 
@@ -8,9 +8,11 @@ class User(Base):
 
     telegram_id = Column(BigInteger, primary_key=True)
     name = Column(String, nullable=True)
+    
     # --- Данные подписки ---
     subscription_level = Column(String, default="free")
     subscription_expires_at = Column(DateTime, nullable=True)
+    
     age = Column(Integer, nullable=True)
     weight = Column(Float, nullable=True)
     height = Column(Float, nullable=True)
@@ -20,16 +22,14 @@ class User(Base):
     workout_level = Column(String, nullable=True)
     workout_days = Column(Integer, default=3)
     
+    # --- СИСТЕМА МОНЕТИЗАЦИИ (старые поля для совместимости) ---
+    is_premium = Column(Boolean, default=False)
+    sub_level = Column(Integer, default=0)
+    sub_end_date = Column(DateTime, nullable=True)
     
-    # --- СИСТЕМА МОНЕТИЗАЦИИ ---
-    is_premium = Column(Boolean, default=False)  # Оставим для обратной совместимости или админов
-    sub_level = Column(Integer, default=0)       # 0 - Free, 1 - Base, 2 - Pro, 3 - Elite
-    sub_end_date = Column(DateTime, nullable=True) # Дата окончания подписки
-    
-    workout_limit = Column(Integer, default=3)   # Бесплатные генерации
-    chat_limit = Column(Integer, default=5)      # Бесплатные вопросы AI
+    workout_limit = Column(Integer, default=3)
+    chat_limit = Column(Integer, default=5)
     last_analysis_date = Column(DateTime, nullable=True)
-    # ---------------------------
 
     notification_time = Column(Integer, default=8)
     current_workout_program = Column(String, nullable=True)
@@ -46,15 +46,11 @@ class WorkoutLog(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, ForeignKey("users.telegram_id")) 
     date = Column(DateTime, default=datetime.datetime.now)
-    
-    # Какое это было занятие (например, "Грудь/Спина" или "День 1")
     workout_type = Column(String, nullable=True) 
     
-    # То, что ты сказал боту (например, "жим на наклонной 30 град")
-    exercise_name = Column(String, nullable=False) 
-    
-    # 🔥 ТО САМОЕ ПОЛЕ для графиков (например, "Жим штанги в наклоне")
-    canonical_name = Column(String, nullable=False) 
+    # ИСПРАВЛЕНО: nullable=True позволяет записывать данные, даже если ИИ не распознал имя
+    exercise_name = Column(String, nullable=True) 
+    canonical_name = Column(String, nullable=True) 
     
     weight = Column(Float, default=0.0)
     reps = Column(Integer, default=0)
@@ -75,7 +71,8 @@ class ExerciseLog(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, ForeignKey("users.telegram_id"), nullable=False)
-    exercise_name = Column(String, nullable=False)
+    # Исправлено на nullable=True
+    exercise_name = Column(String, nullable=True) 
     weight = Column(Float, nullable=False)
     reps = Column(Integer, nullable=False)
     date = Column(DateTime, default=datetime.datetime.now)    
@@ -85,14 +82,14 @@ class NutritionLog(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"))
-    meal_type = Column(String, default="Перекус") # <-- ДОБАВИТЬ ЭТУ СТРОКУ
-    product_name = Column(String, nullable=False)
+    meal_type = Column(String, default="Перекус")
+    # Исправлено на nullable=True
+    product_name = Column(String, nullable=True)
     weight = Column(Float, default=0.0)
     
-    # КБЖУ
     calories = Column(Float, default=0.0)
     protein = Column(Float, default=0.0)
     fat = Column(Float, default=0.0)
     carbs = Column(Float, default=0.0)
     
-    date = Column(DateTime, default=func.now())    
+    date = Column(DateTime, default=func.now())

@@ -44,16 +44,26 @@ async def get_full_profile_text(user, session: AsyncSession) -> str:
     total_workouts = result.scalar() or 0
 
     # Вычисляем ранг
-    if total_workouts < 3:
-        rank = "🌱 Новичок"
-    elif total_workouts < 10:
-        rank = "🥉 Любитель"
-    elif total_workouts < 30:
-        rank = "🥈 Опытный атлет"
-    elif total_workouts < 50:
-        rank = "🥇 Машина"
-    else:
-        rank = "👑 Киборг-убийца"
+    if total_workouts < 3: rank = "🌱 Новичок"
+    elif total_workouts < 10: rank = "🥉 Любитель"
+    elif total_workouts < 30: rank = "🥈 Опытный атлет"
+    elif total_workouts < 50: rank = "🥇 Машина"
+    else: rank = "👑 Киборг-убийца"
+
+    # Словарь тарифов (НОВАЯ СИСТЕМА)
+    sub_map = {
+        "free": "🆓 Free",
+        "lite": "🥉 Lite",
+        "standard": "🥈 Standard",
+        "ultra": "🥇 Ultra"
+    }
+    
+    # Берем статус из subscription_level (то, что прилетает при оплате)
+    current_status = sub_map.get(user.subscription_level, "🆓 Free")
+    
+    if user.subscription_expires_at:
+        date_str = user.subscription_expires_at.strftime('%d.%m.%y')
+        current_status += f" (до {date_str})"
 
     txt_name = html.escape(user.name or "Атлет")
     txt_age = user.age or "-"
@@ -65,13 +75,8 @@ async def get_full_profile_text(user, session: AsyncSession) -> str:
     act_val = user.activity_level
     txt_activity = ACTIVITY_MAP.get(act_val, act_val) if act_val else "-"
     txt_days = f"{user.workout_days} дн/нед" if user.workout_days else "-"
-    
     txt_time = f"{user.notification_time}:00" if user.notification_time is not None else "Откл"
-    sub_names = {0: "🆓 Free", 1: "🥉 Base", 2: "🥈 Pro", 3: "🥇 Elite"}
-    status = sub_names.get(user.sub_level, "🆓 Free")
-    if user.sub_end_date:
-        status += f" (до {user.sub_end_date.strftime('%d.%m.%y')})"
-    
+
     return (
         f"👤 <b>Профиль: {txt_name}</b>\n"
         f"──────────────────\n"
@@ -86,7 +91,7 @@ async def get_full_profile_text(user, session: AsyncSession) -> str:
         f"💪 <b>Уровень:</b> {txt_level}\n"
         f"📅 <b>Режим:</b> {txt_days}\n"
         f"──────────────────\n"
-        f"💎 <b>Статус:</b> {status}\n"
+        f"💎 <b>Статус:</b> {current_status}\n"  # Теперь показывает реально оплаченное
         f"📊 <b>Остаток лимитов:</b>\n"
         f"├ 🍏 Питание/Трен/Анализ: <b>{user.workout_limit}</b>\n"
         f"└ 💬 Вопросы AI: <b>{user.chat_limit}</b>\n"
@@ -99,10 +104,12 @@ def get_profile_keyboard(user):
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
     
-    # Кнопка Premium
-    if not user.is_premium or (user.workout_limit is not None and user.workout_limit < 5):
-        kb.row(InlineKeyboardButton(text="💎 Получить Premium / Пополнить", callback_data="buy_premium"))
+    # Показываем кнопку покупки, если подписка "free"
+    if user.subscription_level == "free" or user.subscription_level is None:
+        kb.row(InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy_premium"))
+    
     kb.row(InlineKeyboardButton(text="📖 Дневник весов", callback_data="exercise_diary"))
+    # ... остальные кнопки
     kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
     kb.row(InlineKeyboardButton(text="🔄 Начать новый цикл", callback_data="confirm_new_cycle"))
     

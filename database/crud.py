@@ -111,6 +111,7 @@ class UserCRUD:
     
     @staticmethod
     async def update_user_subscription(session: AsyncSession, user_id: int, level: str):
+        print(f"DEBUG: Пытаюсь обновить юзера {user_id} на уровень {level}") # ДОБАВЬ ЭТО
         try:
             # 1. Ищем юзера
             result = await session.execute(select(User).where(User.telegram_id == user_id))
@@ -121,6 +122,12 @@ class UserCRUD:
                 user.subscription_level = level
                 user.subscription_expires_at = datetime.now() + timedelta(days=28)
                 
+                if level == "ultra":
+                    user.workout_limit = 100
+                    user.chat_limit = 100
+                elif level == "standard":   
+                    user.workout_limit = 30 
+                    user.chat_limit = 30
                 # 3. Жестко фиксируем в базе
                 await session.flush() 
                 await session.commit()
@@ -133,4 +140,21 @@ class UserCRUD:
             await session.rollback()
             return False
 
-    
+    @staticmethod
+    async def add_workout_log(session: AsyncSession, **kwargs):
+        from database.models import WorkoutLog
+        
+        # ЗАЩИТА: Если ИИ не выдал название упражнения, не пишем в базу
+        if not kwargs.get('exercise_name'):
+            print("⚠️ Ошибка: Название упражнения пустое. Запись в БД пропущена.")
+            return None
+            
+        try:
+            log = WorkoutLog(**kwargs)
+            session.add(log)
+            await session.commit()
+            return log
+        except Exception as e:
+            print(f"❌ Ошибка при сохранении лога: {e}")
+            await session.rollback()
+            return None
