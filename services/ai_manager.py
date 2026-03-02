@@ -313,21 +313,26 @@ class AIManager:
             return f"Ошибка связи с ИИ: {str(e)}"
         
     # --- НОВОЕ: РАСПОЗНАВАНИЕ ГОЛОСА (STT) ---
-    async def transcribe_voice(self, voice_bytes: io.BytesIO) -> str:
+    async def transcribe_voice(self, voice_data) -> str:
         try:
-            # Используем Groq для сверхбыстрого распознавания речи
             groq_client = AsyncGroq(api_key=Config.GROQ_API_KEY)
             
-            # Whisper требует, чтобы у файла было имя с расширением
-            voice_bytes.name = "voice.ogg" 
+            # Если прилетели просто байты, превращаем их в файлоподобный объект
+            if isinstance(voice_data, bytes):
+                audio_file = io.BytesIO(voice_data)
+            else:
+                audio_file = voice_data
+            
+            # Обязательно даем имя с расширением для корректного парсинга кодеками
+            audio_file.name = "voice.ogg" 
             
             transcription = await groq_client.audio.transcriptions.create(
-                file=voice_bytes,
+                file=audio_file,
                 model="whisper-large-v3",
-                language="ru", # Подсказываем, что язык русский
+                language="ru", 
                 response_format="json"
             )
             return transcription.text
         except Exception as e:
-            print(f"Ошибка распознавания голоса: {e}")
+            logger.error(f"Ошибка распознавания голоса: {e}")
             return ""    
