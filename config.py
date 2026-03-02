@@ -7,6 +7,7 @@ load_dotenv()
 class Config:
     # Токен бота
     BOT_TOKEN = os.getenv("BOT_TOKEN")
+    PAYMENTS_TOKEN = os.getenv("PAYMENTS_TOKEN")
     
     # Ключи AI
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")

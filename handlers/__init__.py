@@ -7,5 +7,6 @@ from . import (
     ai_chat,
     analysis,
     admin,
-    common
+    common,
+    payments
 )

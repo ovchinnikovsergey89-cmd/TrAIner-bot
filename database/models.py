@@ -8,6 +8,9 @@ class User(Base):
 
     telegram_id = Column(BigInteger, primary_key=True)
     name = Column(String, nullable=True)
+    # --- Данные подписки ---
+    subscription_level = Column(String, default="free")
+    subscription_expires_at = Column(DateTime, nullable=True)
     age = Column(Integer, nullable=True)
     weight = Column(Float, nullable=True)
     height = Column(Float, nullable=True)

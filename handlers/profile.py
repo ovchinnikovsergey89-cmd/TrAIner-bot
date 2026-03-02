@@ -113,16 +113,38 @@ def get_profile_keyboard(user):
 @router.message(Command("profile"))
 async def show_profile_view(message: Message, session: AsyncSession, state: FSMContext):
     await state.clear()
+    
     user = await UserCRUD.get_user(session, message.from_user.id)
     if not user:
         await message.answer("Сначала пройдите регистрацию: /start")
         return
+        
+    # Принудительно обновляем данные пользователя, чтобы точно увидеть оплату (сброс кэша)
+    await session.refresh(user)
     
-    # Получаем красивый текст с рангом
-    text = await get_full_profile_text(user, session)
+    # Твой исходный вызов получения текста с рангом
+    base_text = await get_full_profile_text(user, session)
+
+    # --- ДОБАВЛЯЕМ ЛОГИКУ ВЫВОДА ТАРИФА ---
+    sub_map = {
+        "free": "🆓 Бесплатный",
+        "lite": "🥉 Лайт",
+        "standard": "🥈 Стандарт",
+        "ultra": "🥇 Ультра"
+    }
+    # Берем тариф из базы или ставим 'free' по умолчанию
+    current_sub = sub_map.get(user.subscription_level, "🆓 Бесплатный")
+    
+    expire_text = ""
+    if user.subscription_expires_at:
+        date_str = user.subscription_expires_at.strftime("%d.%m.%Y")
+        expire_text = f" <i>(до {date_str})</i>"
+        
+    # Приклеиваем красивый тариф в самое начало твоего текста профиля
+    final_text = f"💳 <b>Текущий тариф:</b> {current_sub}{expire_text}\n\n{base_text}"
 
     await message.answer(
-        text=text, 
+        text=final_text, 
         reply_markup=get_profile_keyboard(user),
         parse_mode="HTML"
     )

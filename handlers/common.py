@@ -1,3 +1,4 @@
+from aiogram import Router, types
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
@@ -8,6 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from keyboards.main_menu import get_main_menu
 from services.rutube_service import search_exercise_video
+from keyboards.subscription import get_subscription_keyboard
 
 router = Router()
 
@@ -81,3 +83,21 @@ async def process_video_search(message: Message, state: FSMContext):
     else:
         # При ошибке оставляем пользователя в состоянии поиска, чтобы он мог исправить опечатку
         await message.answer("❌ Не нашел видео. Попробуй написать точнее (например: 'Приседания').")
+
+@router.message(Command("subscribe"))
+async def cmd_subscribe(message: types.Message):
+    text = (
+        "💳 **Выберите тариф подписки TrAIner Bot**\n\n"
+        "🥉 **Лайт (149 ₽):**\n"
+        "— Программы тренировок от ИИ\n"
+        "— Графики прогресса и аналитика\n\n"
+        "🥈 **Стандарт (299 ₽):**\n"
+        "— Питание: 3 варианта блюд на выбор\n"
+        "— Голосовой ввод тренировок (Whisper)\n"
+        "— Все функции Лайт\n\n"
+        "🥇 **Ультра (499 ₽):**\n"
+        "— Личный ИИ-чат (до 100 запросов/мес)\n"
+        "— Глубокий анализ рациона\n"
+        "— Все функции Стандарт"
+    )
+    await message.answer(text, reply_markup=get_subscription_keyboard(), parse_mode="Markdown")        

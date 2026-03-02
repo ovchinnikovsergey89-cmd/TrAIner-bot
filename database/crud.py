@@ -1,7 +1,8 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc
 from datetime import datetime, timedelta
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
 from database.models import User
+from database.database import async_session as AsyncSessionLocal # Убедись, что импорт правильный
 
 class UserCRUD:
     
@@ -107,3 +108,29 @@ class UserCRUD:
             'has_nutrition': nutrition,
             'active_24h': active_24h
         }
+    
+    @staticmethod
+    async def update_user_subscription(session: AsyncSession, user_id: int, level: str):
+        try:
+            # 1. Ищем юзера
+            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            user = result.scalar_one_or_none()
+            
+            if user:
+                # 2. Меняем данные
+                user.subscription_level = level
+                user.subscription_expires_at = datetime.now() + timedelta(days=28)
+                
+                # 3. Жестко фиксируем в базе
+                await session.flush() 
+                await session.commit()
+                
+                print(f"✅ БАЗА ДАННЫХ: Установлен статус {level} для {user_id}")
+                return True
+            return False
+        except Exception as e:
+            print(f"❌ ОШИБКА В CRUD: {e}")
+            await session.rollback()
+            return False
+
+    
