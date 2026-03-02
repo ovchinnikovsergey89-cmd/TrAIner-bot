@@ -41,10 +41,21 @@ class WorkoutLog(Base):
     __tablename__ = "workout_logs"
 
     id = Column(Integer, primary_key=True)
-    # Ссылаемся на telegram_id, так как в таблице User нет колонки id
     user_id = Column(BigInteger, ForeignKey("users.telegram_id")) 
     date = Column(DateTime, default=datetime.datetime.now)
-    workout_type = Column(String)  # Например: "День 1", "День 2"
+    
+    # Какое это было занятие (например, "Грудь/Спина" или "День 1")
+    workout_type = Column(String, nullable=True) 
+    
+    # То, что ты сказал боту (например, "жим на наклонной 30 град")
+    exercise_name = Column(String, nullable=False) 
+    
+    # 🔥 ТО САМОЕ ПОЛЕ для графиков (например, "Жим штанги в наклоне")
+    canonical_name = Column(String, nullable=False) 
+    
+    weight = Column(Float, default=0.0)
+    reps = Column(Integer, default=0)
+    sets = Column(Integer, default=0)
 
 class WeightHistory(Base):
     __tablename__ = 'weight_history'
