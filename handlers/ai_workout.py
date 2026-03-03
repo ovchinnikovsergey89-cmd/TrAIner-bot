@@ -2,6 +2,8 @@ import re
 import json
 import datetime
 import time
+import os
+import asyncio
 from aiogram import Bot
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -13,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select, desc
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
+from faster_whisper import WhisperModel
 from handlers.admin import is_admin
 from utils.text_tools import clean_text
 from database.crud import UserCRUD
@@ -22,6 +25,8 @@ from keyboards.pagination import get_pagination_kb
 from database.models import WorkoutLog, ExerciseLog
 
 router = Router()
+
+whisper_model = WhisperModel("base", device="cpu", compute_type="default")
 
 # ==========================================
 # 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -642,39 +647,62 @@ async def exit_log_exercise(message: Message, state: FSMContext):
     if pages:
         await show_workout_pages(message, state, pages, from_db=True)
 
-@router.message(WorkoutRequest.waiting_for_weights, F.voice | F.text)
-async def process_smart_workout_input(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
-    user = await UserCRUD.get_user(session, message.from_user.id)
-    is_admin_user = is_admin(message.from_user.id)
+# Ловим и ТЕКСТ, и ГОЛОС одной функцией
+@router.message(WorkoutRequest.waiting_for_weights, F.text | F.voice)
+async def handle_weights_input(message: Message, bot: Bot, session: AsyncSession, state: FSMContext):
     
-    # 1. Получаем текст (из голоса или напрямую из сообщения)
+    # 1. Проверка лимитов
+    user = await UserCRUD.get_user(session, message.from_user.id)
+    if not user or user.workout_limit <= 0:
+        await message.answer("❌ <b>Лимит генераций тренировок исчерпан.</b>", parse_mode="HTML")
+        return
+
+    status_msg = await message.answer("⏳ <i>Обрабатываю данные...</i>", parse_mode="HTML")
+    input_text = ""
+
+    # ==========================================
+    # 2. ЕСЛИ ЭТО ГОЛОСОВОЕ СООБЩЕНИЕ
+    # ==========================================
     if message.voice:
-        # Проверка тарифа только для голоса (как ты и хотел)
-        if not is_admin_user and (user.sub_level or 0) < 2:
-            await message.answer("🎙 <b>Голосовой ввод доступен с тарифа Pro!</b>\nНапиши данные текстом.", parse_mode="HTML")
+        file_id = message.voice.file_id
+        file = await bot.get_file(file_id)
+        temp_filename = f"voice_{message.from_user.id}.ogg"
+        
+        await bot.download_file(file.file_path, temp_filename)
+        await asyncio.sleep(0.5)
+
+        try:
+            segments, _ = whisper_model.transcribe(temp_filename, beam_size=5, language="ru")
+            input_text = "".join([segment.text for segment in segments]).strip()
+        except Exception as e:
+            print(f"Ошибка Whisper: {e}")
+        finally:
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
+        
+        if not input_text:
+            await status_msg.edit_text("📝 Не удалось разобрать слова. Пожалуйста, скажите чуть четче.")
             return
             
-        status_msg = await message.answer("🎧 <i>Слушаю...</i>", parse_mode="HTML")
-        voice_file_info = await bot.get_file(message.voice.file_id)
-        voice_bytes = await bot.download_file(voice_file_info.file_path)
-        manager = AIManager()
-        input_text = await manager.transcribe_voice(voice_bytes)
-        await status_msg.delete()
+        await status_msg.edit_text(f"🎤 Вы сказали: <b>{input_text}</b>\n\n⏳ Анализирую...", parse_mode="HTML")
+        
+    # ==========================================
+    # 3. ЕСЛИ ЭТО ОБЫЧНЫЙ ТЕКСТ
+    # ==========================================
     else:
         input_text = message.text
 
-    if not input_text:
-        return await message.answer("Не удалось получить данные. Попробуй еще раз.")
-
-    # 2. Информируем пользователя, что ИИ начал думать
-    status_msg = await message.answer(f"🗣 <i>«{input_text}»</i>\n\n🤔 <i>Анализирую...</i>", parse_mode="HTML")
-
+    # ==========================================
+    # 4. ОБЩАЯ ЧАСТЬ: ОТПРАВКА В ИИ И СОХРАНЕНИЕ
+    # ==========================================
     try:
-        # Достаем тип тренировки из состояния
+        # Списываем лимит
+        await UserCRUD.reduce_limit(session, message.from_user.id, 'workout')
+        
         state_data = await state.get_data()
         workout_type = state_data.get("workout_type", "Тренировка")
 
-        # 3. УЛЬТИМАТИВНЫЙ ПРОМПТ (с сохранением градусов)
+        # Твой ультимативный промпт
         parse_prompt = (
             "Ты — строгий фитнес-аналитик. Твоя задача: привести упражнение к ЕДИНОМУ СТАНДАРТУ для базы данных.\n\n"
             "ПРАВИЛА КАНОНИЧНОГО НАЗВАНИЯ:\n"
@@ -689,21 +717,27 @@ async def process_smart_workout_input(message: Message, session: AsyncSession, s
         )
         
         manager = AIManager()
-        parsed_response = await manager.get_chat_response([{"role": "user", "content": parse_prompt}], {})
+        ai_response = await manager.get_chat_response([{"role": "user", "content": parse_prompt}], {})
         
-        # 4. Сохранение
-        lines = parsed_response.strip().split('\n')
+        # Парсим железобетонно
+        lines = ai_response.strip().split('\n')
         saved_exercises = []
-
+        
         for line in lines:
             parts = line.split('|')
             if len(parts) >= 5:
                 try:
                     orig_name = parts[0].strip()
                     canon_name = parts[1].strip()
-                    weight = float(parts[2].strip().replace(',', '.'))
-                    reps = int(parts[3].strip())
-                    sets = int(parts[4].strip())
+                    
+                    weight_match = re.search(r"[\d\.]+", parts[2].strip().replace(',', '.'))
+                    weight = float(weight_match.group(0)) if weight_match else 0.0
+                    
+                    reps_match = re.search(r"\d+", parts[3].strip())
+                    reps = int(reps_match.group(0)) if reps_match else 0
+                    
+                    sets_match = re.search(r"\d+", parts[4].strip())
+                    sets = int(sets_match.group(0)) if sets_match else 1
                     
                     new_log = WorkoutLog(
                         user_id=message.from_user.id,
@@ -716,7 +750,9 @@ async def process_smart_workout_input(message: Message, session: AsyncSession, s
                     )
                     session.add(new_log)
                     saved_exercises.append(f"🔹 <b>{canon_name}</b>\n└ {weight}кг x {reps} (подходов: {sets})")
-                except: continue
+                except Exception as parse_err:
+                    print(f"⚠️ Ошибка парсинга: {line} | {parse_err}")
+                    continue
         
         await session.commit()
         
@@ -724,9 +760,10 @@ async def process_smart_workout_input(message: Message, session: AsyncSession, s
             result_text = "✨ <b>Записано в дневник:</b>\n\n" + "\n\n".join(saved_exercises)
             result_text += "\n\n<i>✍️ Пиши/диктуй дальше или нажми «Завершить»</i>"
         else:
-            result_text = "❌ Не удалось распознать упражнение. Напиши четче (напр: Жим 80 10)."
+            result_text = "❌ Не удалось распознать упражнение. Напиши четче (напр: Жим лежа 80 10)."
             
         await status_msg.edit_text(result_text, parse_mode="HTML")
-        
+
     except Exception as e:
-        await status_msg.edit_text("❌ Ошибка при обработке данных. Попробуй еще раз.")    
+        print(f"❌ Критическая ошибка ИИ: {e}")
+        await status_msg.edit_text("🔧 Произошла ошибка при обработке данных.")    

@@ -158,3 +158,21 @@ class UserCRUD:
             print(f"❌ Ошибка при сохранении лога: {e}")
             await session.rollback()
             return None
+
+    # ==========================================
+    # ВОТ ЭТОТ НОВЫЙ КУСОК ВСТАВЛЯЕМ СЮДА:
+    # ==========================================
+    @classmethod
+    async def reduce_limit(cls, session: AsyncSession, telegram_id: int, limit_type: str):
+        """Списывает 1 лимит указанного типа у пользователя"""
+        user = await cls.get_user(session, telegram_id)
+        if not user:
+            return False
+            
+        if limit_type == 'workout' and user.workout_limit > 0:
+            user.workout_limit -= 1
+        elif limit_type == 'chat' and user.chat_limit > 0:
+            user.chat_limit -= 1
+            
+        await session.commit()
+        return True
