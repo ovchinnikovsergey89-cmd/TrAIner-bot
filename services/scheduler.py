@@ -80,7 +80,7 @@ async def reset_daily_limits(session_pool: async_sessionmaker):
     msk_tz = pytz.timezone("Europe/Moscow")
     now = datetime.datetime.now(msk_tz).replace(tzinfo=None) # Убираем tzinfo для совместимости со SQLite
 
-        async with session_pool() as session:
+    async with session_pool() as session:
         # 1. Проверяем просроченные подписки и сбрасываем их на Free ("free")
         await session.execute(
             update(User)

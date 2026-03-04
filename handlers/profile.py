@@ -348,7 +348,7 @@ async def process_buy_premium(callback: CallbackQuery):
 @router.callback_query(F.data == "exercise_diary")
 async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     user_id = callback.from_user.id
-        user = await UserCRUD.get_user(session, user_id)
+    user = await UserCRUD.get_user(session, user_id)
     
     from handlers.admin import is_admin
     # Проверяем подписку: доступно только для standard и ultra тарифов

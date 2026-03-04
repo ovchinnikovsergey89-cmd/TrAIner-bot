@@ -1,11 +1,12 @@
 import os
 import asyncio
-from faster_whisper import WhisperModel
-from aiogram import Bot
 import io
 import html
 import logging
+from faster_whisper import WhisperModel
+from aiogram import Bot
 from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
@@ -129,15 +130,26 @@ async def handle_chat_voice(message: Message, bot: Bot):
     status_msg = await message.answer("🎧 <i>Слушаю...</i>", parse_mode="HTML")
 
 # --- ОБРАБОТКА КОМАНДЫ /RESET ---
+# --- ОБРАБОТКА КОМАНДЫ /RESET ---
 @router.message(Command("reset"))
-async def handle_reset_command(message: Message):
-    await state_manager.reset_history(message.from_user.id)
+async def handle_reset_command(message: Message, state: FSMContext):
+    # Очищаем историю в FSM
+    await state.update_data(chat_history=[])
     await message.answer("🔄 История диалога очищена!")
-            "🎙 <b>Голосовой помощник — это функция тарифов Standard и Ultra!</b>\n\nОформи подписку, чтобы общаться голосом.",
-            reply_markup=premium_kb,
-            parse_mode="HTML"
-        )
-        return
+
+# --- БЛОК ПРОВЕРКИ ГОЛОСА (пример встраивания в логику) ---
+# Если нужно отправить сообщение о премиуме:
+    premium_text = (
+        "🎙 <b>Голосовой помощник — это функция тарифов Standard и Ultra!</b>\n\n"
+        "Оформи подписку, чтобы общаться голосом."
+    )
+    
+    await message.answer(
+        text=premium_text,
+        reply_markup=premium_kb, # Убедись, что premium_kb определена выше
+        parse_mode="HTML"
+    )
+    return
 
     # 2. ПРОВЕРКА ЛИМИТОВ
     if not is_admin_user and (user.chat_limit or 0) <= 0:

@@ -29,6 +29,7 @@ class User(Base):
     
     workout_limit = Column(Integer, default=3)
     chat_limit = Column(Integer, default=5)
+    nutrition_limit = Column(Integer, default=3)
     last_analysis_date = Column(DateTime, nullable=True)
 
     notification_time = Column(Integer, default=8)
