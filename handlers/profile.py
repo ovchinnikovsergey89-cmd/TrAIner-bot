@@ -348,11 +348,13 @@ async def process_buy_premium(callback: CallbackQuery):
 @router.callback_query(F.data == "exercise_diary")
 async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     user_id = callback.from_user.id
-    user = await UserCRUD.get_user(session, user_id)
+        user = await UserCRUD.get_user(session, user_id)
     
     from handlers.admin import is_admin
-    if not is_admin(user_id) and (user.sub_level or 0) < 2:
-        await callback.answer("📖 Дневник рабочих весов доступен только на тарифах Pro и Elite!", show_alert=True)
+    # Проверяем подписку: доступно только для standard и ultra тарифов
+    user_sub = user.subscription_level or "free"
+    if not is_admin(user_id) and user_sub in ["free", "lite"]:
+        await callback.answer("📖 Дневник рабочих весов доступен только на тарифах Standard и Ultra!", show_alert=True)
         return
     # ... старый код вывода дневника ...
     

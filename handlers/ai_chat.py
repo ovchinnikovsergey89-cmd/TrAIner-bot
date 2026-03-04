@@ -57,7 +57,82 @@ async def handle_chat_voice(message: Message, bot: Bot):
         premium_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]
         ])
-                await message.answer(
+# --- ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ В РЕЖИМЕ ЧАТА ---
+@router.message(StateFilter(None, AIChatState.chatting), F.text)
+async def handle_chat_message(message: Message, bot: Bot):
+    user = await UserCRUD.get_user(session, message.from_user.id)
+    is_admin_user = is_admin(message.from_user.id)
+
+    # 1. ПРОВЕРКА ЛИМИТОВ
+    if not is_admin_user and (user.chat_limit or 0) <= 0:
+        await message.answer("🚀 Лимит сообщений на сегодня исчерпан!")
+        return
+
+    # 2. ПРОВЕРКА НА ПРОБЕЛЫ/ПУСТЫЕ СООБЩЕНИЯ
+    if not message.text.strip():
+        await message.answer("📝 Пожалуйста, введите текст сообщения.")
+        return
+
+    # 3. ОБРАБОТКА СООБЩЕНИЯ
+    status_msg = await message.answer("🤔 <i>Думаю...</i>", parse_mode="HTML")
+
+    try:
+        # Уменьшаем лимит для обычных пользователей
+        if not is_admin_user:
+            await UserCRUD.update_user(
+                session,
+                message.from_user.id,
+                chat_limit=(user.chat_limit or 0) - 1
+            )
+
+        # Получаем ответ от AI
+        response = await get_ai_response(message.text, user)
+
+        # Отправляем ответ
+        await status_msg.edit_text(
+            response,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке сообщения: {e}")
+        await status_msg.edit_text(
+            "⚠️ Произошла ошибка при обработке запроса. Попробуйте позже.",
+            parse_mode="HTML"
+        )
+
+# --- НОВОЕ: ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ (ТОЛЬКО PREMIUM) ---
+@router.message(StateFilter(None, AIChatState.chatting), F.voice)
+async def handle_chat_voice(message: Message, bot: Bot):
+    user = await UserCRUD.get_user(session, message.from_user.id)
+    is_admin_user = is_admin(message.from_user.id)
+
+    # 1. ПРОВЕРКА НА PRO ТАРИФ
+    user_sub = user.subscription_level or "free"
+    if not is_admin_user and user_sub in ["free", "lite"]:
+        premium_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]
+        ])
+        await message.answer(
+            "🎙 <b>Голосовой помощник — это функция тарифов Standard и Ultra!</b>\n\nОформи подписку, чтобы общаться голосом.",
+            reply_markup=premium_kb,
+            parse_mode="HTML"
+        )
+        return
+
+    # 2. ПРОВЕРКА ЛИМИТОВ
+    if not is_admin_user and (user.chat_limit or 0) <= 0:
+        await message.answer("🚀 Лимит сообщений на сегодня исчерпан!")
+        return
+
+    status_msg = await message.answer("🎧 <i>Слушаю...</i>", parse_mode="HTML")
+
+# --- ОБРАБОТКА КОМАНДЫ /RESET ---
+@router.message(Command("reset"))
+async def handle_reset_command(message: Message):
+    await state_manager.reset_history(message.from_user.id)
+    await message.answer("🔄 История диалога очищена!")
             "🎙 <b>Голосовой помощник — это функция тарифов Standard и Ultra!</b>\n\nОформи подписку, чтобы общаться голосом.",
             reply_markup=premium_kb,
             parse_mode="HTML"
