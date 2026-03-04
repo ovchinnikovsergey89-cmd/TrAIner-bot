@@ -9,6 +9,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
+from aiogram.filters import StateFilter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.crud import UserCRUD
@@ -45,19 +46,19 @@ async def start_chat_text(message: Message, state: FSMContext):
     await start_chat_logic(message, state)
 
 # --- НОВОЕ: ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ (ТОЛЬКО PREMIUM) ---
-# --- НОВОЕ: ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ (ТОЛЬКО PREMIUM) ---
-@router.message(F.voice)
-async def process_voice_message(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
+@router.message(StateFilter(None, AIChatState.chatting), F.voice)
+async def handle_chat_voice(message: Message, bot: Bot):
     user = await UserCRUD.get_user(session, message.from_user.id)
     is_admin_user = is_admin(message.from_user.id)
     
-    # 1. ПРОВЕРКА НА PRO ТАРИФ
-    if not is_admin_user and user.sub_level < 2:
+        # 1. ПРОВЕРКА НА PRO ТАРИФ
+    user_sub = user.subscription_level or "free"
+    if not is_admin_user and user_sub in ["free", "lite"]:
         premium_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]
         ])
-        await message.answer(
-            "🎙 <b>Голосовой помощник — это функция тарифа Pro!</b>\n\nОформи подписку, чтобы общаться голосом.",
+                await message.answer(
+            "🎙 <b>Голосовой помощник — это функция тарифов Standard и Ultra!</b>\n\nОформи подписку, чтобы общаться голосом.",
             reply_markup=premium_kb,
             parse_mode="HTML"
         )

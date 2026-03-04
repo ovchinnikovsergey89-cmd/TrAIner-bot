@@ -13,10 +13,10 @@ logger = logging.getLogger(__name__)
 
 # Настройки тарифов: {Уровень: (Генерации, Вопросы)}
 SUBSCRIPTION_LIMITS = {
-    0: (3, 5),      # Free
-    1: (10, 20),    # Base
-    2: (25, 50),    # Pro 
-    3: (50, 100)    # Elite
+    "free": (3, 5),      # Free
+    "lite": (10, 20),    # Lite
+    "standard": (25, 50),    # Standard 
+    "ultra": (50, 100)    # Ultra
 }
 
 async def send_morning_motivation(bot: Bot, session_pool: async_sessionmaker):
@@ -81,11 +81,11 @@ async def reset_daily_limits(session_pool: async_sessionmaker):
     now = datetime.datetime.now(msk_tz).replace(tzinfo=None) # Убираем tzinfo для совместимости со SQLite
 
     async with session_pool() as session:
-        # 1. Проверяем просроченные подписки и сбрасываем их на Free (0)
+                # 1. Проверяем просроченные подписки и сбрасываем их на Free ("free")
         await session.execute(
             update(User)
-            .where((User.sub_level > 0) & (User.sub_end_date < now))
-            .values(sub_level=0, is_premium=False, sub_end_date=None)
+            .where((User.subscription_level != "free") & (User.subscription_expires_at < now))
+            .values(subscription_level="free", subscription_expires_at=None)
         )
         await session.commit()
 

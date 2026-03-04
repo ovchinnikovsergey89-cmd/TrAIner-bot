@@ -379,8 +379,8 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     for log in latest_logs.values():
         date_str = log.date.strftime("%d.%m") # Формат даты: 26.02
         
-        # Убираем ".0", если вес целое число (например, 80.0 -> 80)
-        weight_display = int(log.weight) if log.weight.is_integer() else log.weight
+                # Убираем ".0", если вес целое число (например, 80.0 -> 80)
+        weight_display = int(log.weight) if log.weight == int(log.weight) else log.weight
         
         text += f"🏋️‍♂️ <b>{log.exercise_name.capitalize()}:</b> {weight_display} кг х {log.reps} <i>({date_str})</i>\n"
         

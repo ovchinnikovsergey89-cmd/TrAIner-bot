@@ -4,8 +4,7 @@ import datetime
 import time
 import os
 import asyncio
-from aiogram import Bot
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -648,8 +647,8 @@ async def exit_log_exercise(message: Message, state: FSMContext):
         await show_workout_pages(message, state, pages, from_db=True)
 
 # Ловим и ТЕКСТ, и ГОЛОС одной функцией
-@router.message(WorkoutRequest.waiting_for_weights, F.text | F.voice)
-async def handle_weights_input(message: Message, bot: Bot, session: AsyncSession, state: FSMContext):
+@router.message(WorkoutRequest.waiting_for_wishes, F.text | F.voice)
+async def process_workout_wishes(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
     
     # 1. Проверка лимитов
     user = await UserCRUD.get_user(session, message.from_user.id)
