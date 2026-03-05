@@ -1,30 +1,23 @@
 import os
 import asyncio
-import io
-import html
 import logging
-from faster_whisper import WhisperModel
-from aiogram import Bot
-from aiogram import Router, F
+from aiogram import Bot, Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
-from aiogram.filters import StateFilter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.crud import UserCRUD
 from services.ai_manager import AIManager 
 from states.chat_states import AIChatState
 from keyboards.main_menu import get_main_menu
-from handlers.admin import is_admin  # Важно: импорт должен быть здесь!
+from handlers.admin import is_admin
 
-# Настройка логгера, чтобы видеть ошибки в консоли
+# Настройка логгера
 logger = logging.getLogger(__name__)
 
 router = Router()
-
-whisper_model = WhisperModel("base", device="cpu", compute_type="default")
 
 def get_chat_kb():
     return ReplyKeyboardMarkup(
@@ -46,70 +39,21 @@ async def start_chat_logic(message: Message, state: FSMContext):
 async def start_chat_text(message: Message, state: FSMContext):
     await start_chat_logic(message, state)
 
-# --- НОВОЕ: ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ (ТОЛЬКО PREMIUM) ---
-@router.message(StateFilter(None, AIChatState.chatting), F.voice)
-async def handle_chat_voice(message: Message, bot: Bot):
+# --- ОБРАБОТКА КОМАНДЫ /RESET ---
+@router.message(Command("reset"))
+async def handle_reset_command(message: Message, state: FSMContext):
+    await state.update_data(chat_history=[])
+    await message.answer("🔄 История диалога очищена!")
+
+# ==========================================
+# ОБРАБОТКА ГОЛОСОВЫХ В ЧАТЕ (ТОЛЬКО PREMIUM)
+# ==========================================
+@router.message(AIChatState.chatting, F.voice)
+async def process_voice_message(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
     user = await UserCRUD.get_user(session, message.from_user.id)
     is_admin_user = is_admin(message.from_user.id)
     
-        # 1. ПРОВЕРКА НА PRO ТАРИФ
-    user_sub = user.subscription_level or "free"
-    if not is_admin_user and user_sub in ["free", "lite"]:
-        premium_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]
-        ])
-# --- ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ В РЕЖИМЕ ЧАТА ---
-@router.message(StateFilter(None, AIChatState.chatting), F.text)
-async def handle_chat_message(message: Message, bot: Bot):
-    user = await UserCRUD.get_user(session, message.from_user.id)
-    is_admin_user = is_admin(message.from_user.id)
-
-    # 1. ПРОВЕРКА ЛИМИТОВ
-    if not is_admin_user and (user.chat_limit or 0) <= 0:
-        await message.answer("🚀 Лимит сообщений на сегодня исчерпан!")
-        return
-
-    # 2. ПРОВЕРКА НА ПРОБЕЛЫ/ПУСТЫЕ СООБЩЕНИЯ
-    if not message.text.strip():
-        await message.answer("📝 Пожалуйста, введите текст сообщения.")
-        return
-
-    # 3. ОБРАБОТКА СООБЩЕНИЯ
-    status_msg = await message.answer("🤔 <i>Думаю...</i>", parse_mode="HTML")
-
-    try:
-        # Уменьшаем лимит для обычных пользователей
-        if not is_admin_user:
-            await UserCRUD.update_user(
-                session,
-                message.from_user.id,
-                chat_limit=(user.chat_limit or 0) - 1
-            )
-
-        # Получаем ответ от AI
-        response = await get_ai_response(message.text, user)
-
-        # Отправляем ответ
-        await status_msg.edit_text(
-            response,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-
-    except Exception as e:
-        logger.error(f"Ошибка при обработке сообщения: {e}")
-        await status_msg.edit_text(
-            "⚠️ Произошла ошибка при обработке запроса. Попробуйте позже.",
-            parse_mode="HTML"
-        )
-
-# --- НОВОЕ: ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ (ТОЛЬКО PREMIUM) ---
-@router.message(StateFilter(None, AIChatState.chatting), F.voice)
-async def handle_chat_voice(message: Message, bot: Bot):
-    user = await UserCRUD.get_user(session, message.from_user.id)
-    is_admin_user = is_admin(message.from_user.id)
-
-    # 1. ПРОВЕРКА НА PRO ТАРИФ
+    # 1. ПРОВЕРКА НА PRO ТАРИФ (Standard и Ultra)
     user_sub = user.subscription_level or "free"
     if not is_admin_user and user_sub in ["free", "lite"]:
         premium_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -128,46 +72,17 @@ async def handle_chat_voice(message: Message, bot: Bot):
         return
 
     status_msg = await message.answer("🎧 <i>Слушаю...</i>", parse_mode="HTML")
-
-# --- ОБРАБОТКА КОМАНДЫ /RESET ---
-# --- ОБРАБОТКА КОМАНДЫ /RESET ---
-@router.message(Command("reset"))
-async def handle_reset_command(message: Message, state: FSMContext):
-    # Очищаем историю в FSM
-    await state.update_data(chat_history=[])
-    await message.answer("🔄 История диалога очищена!")
-
-# --- БЛОК ПРОВЕРКИ ГОЛОСА (пример встраивания в логику) ---
-# Если нужно отправить сообщение о премиуме:
-    premium_text = (
-        "🎙 <b>Голосовой помощник — это функция тарифов Standard и Ultra!</b>\n\n"
-        "Оформи подписку, чтобы общаться голосом."
-    )
     
-    await message.answer(
-        text=premium_text,
-        reply_markup=premium_kb, # Убедись, что premium_kb определена выше
-        parse_mode="HTML"
-    )
-    return
-
-    # 2. ПРОВЕРКА ЛИМИТОВ
-    if not is_admin_user and (user.chat_limit or 0) <= 0:
-        await message.answer("🚀 Лимит сообщений на сегодня исчерпан!")
-        return
-
-    status_msg = await message.answer("🎧 <i>Слушаю...</i>", parse_mode="HTML")
-    
-    # 3. СКАЧИВАЕМ АУДИО (Правильно и без ошибок)
-    temp_filename = f"voice_{message.from_user.id}.ogg"
+    # 3. СКАЧИВАЕМ АУДИО
+    temp_filename = f"voice_chat_{message.from_user.id}.ogg"
     voice_file_info = await bot.get_file(message.voice.file_id)
     await bot.download_file(voice_file_info.file_path, temp_filename)
-    await asyncio.sleep(0.3) # Даем серверу долю секунды на сохранение файла
+    await asyncio.sleep(0.1)
 
     try:
-        # 4. ПЕРЕВОДИМ ГОЛОС В ТЕКСТ (Быстрый Faster-Whisper)
-        segments, _ = whisper_model.transcribe(temp_filename, beam_size=5, language="ru")
-        recognized_text = "".join([segment.text for segment in segments]).strip()
+        manager = AIManager()
+        # 4. ПЕРЕВОДИМ ГОЛОС В ТЕКСТ (через Groq в AIManager)
+        recognized_text = await manager.transcribe_voice(temp_filename)
 
         if not recognized_text:
             await status_msg.edit_text("❌ Не удалось разобрать слова. Попробуй сказать четче.")
@@ -181,7 +96,6 @@ async def handle_reset_command(message: Message, state: FSMContext):
         await status_msg.edit_text(f"🎤 Вы сказали: <i>{recognized_text}</i>\n\n⏳ Тренер думает...", parse_mode="HTML")
 
         # 6. ОТПРАВЛЯЕМ В ИИ (DeepSeek)
-        manager = AIManager()
         state_data = await state.get_data()
         current_history = state_data.get("chat_history", [])
         current_history.append({"role": "user", "content": recognized_text})
@@ -196,7 +110,7 @@ async def handle_reset_command(message: Message, state: FSMContext):
         await status_msg.delete()
 
     except Exception as e:
-        logger.error(f"Ошибка голоса: {e}")
+        logger.error(f"Ошибка голоса в чате: {e}")
         await status_msg.edit_text("🔧 Произошла системная ошибка при обработке аудио.")
     
     finally:
@@ -204,11 +118,12 @@ async def handle_reset_command(message: Message, state: FSMContext):
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
 
-@router.message(AIChatState.chatting)
+# ==========================================
+# ОБРАБОТКА ТЕКСТА В ЧАТЕ
+# ==========================================
+@router.message(AIChatState.chatting, F.text)
 async def process_chat_message(message: Message, state: FSMContext, session: AsyncSession):
-    # Инициализируем всё в самом начале
     user_text = message.text or ""
-    ai_answer = ""
     loading_msg = None
     
     # Выход из чата
@@ -217,8 +132,12 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
         await message.answer("Чат завершен.", reply_markup=get_main_menu())
         return
 
+    # Проверка на пустое сообщение
+    if not user_text.strip():
+        await message.answer("📝 Пожалуйста, введите текст сообщения.")
+        return
+
     try:
-        # Получаем данные
         user = await UserCRUD.get_user(session, message.from_user.id)
         is_admin_user = is_admin(message.from_user.id)
 
@@ -227,11 +146,9 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
             await message.answer("🚀 Попытки закончились!")
             return
 
-        # Показываем статус "печатает"
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
         loading_msg = await message.answer("💬 <b>Тренер думает...</b>", parse_mode="HTML")
 
-        # Работа с историей
         state_data = await state.get_data()
         current_history = state_data.get("chat_history", [])
         current_history.append({"role": "user", "content": user_text})
@@ -242,7 +159,7 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
         
         ai_answer = await manager.get_chat_response(current_history, u_ctx)
 
-        # Списание лимита (только после получения ответа)
+        # Списание лимита 
         if not is_admin_user:
             user.chat_limit -= 1
             await session.commit()
@@ -251,11 +168,12 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
         current_history.append({"role": "assistant", "content": ai_answer})
         await state.update_data(chat_history=current_history[-6:])
 
-        # Удаляем "лоадинг" и отправляем ответ
         if loading_msg:
-            await loading_msg.delete()
+            try:
+                await loading_msg.delete()
+            except:
+                pass
         
-        # Самая безопасная отправка: если HTML не проходит, шлем обычным текстом
         try:
             await message.answer(ai_answer, parse_mode="HTML")
         except:
@@ -274,8 +192,8 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
 @router.callback_query(F.data.in_(["back", "close", "cancel"]))
 async def universal_close_button(callback: CallbackQuery):
     try:
-        await callback.message.delete() # Просто удаляем сообщение с кнопкой
+        await callback.message.delete()
     except Exception:
         pass 
     finally:
-        await callback.answer() # "Гасим" загрузку на кнопке
+        await callback.answer()

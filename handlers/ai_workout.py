@@ -5,7 +5,7 @@ import time
 import os
 import asyncio
 from aiogram import Router, F, Bot
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.enums import ParseMode
@@ -610,7 +610,7 @@ async def cancel_reset_handler(callback: CallbackQuery):
 # ==========================================
 # 7. ЗАПИСЬ РАБОЧИХ ВЕСОВ В УПРАЖНЕНИЯХ
 # ==========================================
-@router.callback_query(F.data == "log_weight_press")
+@router.callback_query(F.data == "log_weight_press", StateFilter("*")) # Добавили StateFilter("*")
 async def start_log_exercise(callback: CallbackQuery, state: FSMContext):
     # Создаем клавиатуру с кнопкой "Завершить запись"
     kb = ReplyKeyboardMarkup(
@@ -627,6 +627,7 @@ async def start_log_exercise(callback: CallbackQuery, state: FSMContext):
         reply_markup=kb,
         parse_mode="HTML"
     )
+    # Переводим в состояние ожидания ВЕСОВ
     await state.set_state(WorkoutRequest.waiting_for_weights)
     await callback.answer()
 
@@ -647,13 +648,14 @@ async def exit_log_exercise(message: Message, state: FSMContext):
         await show_workout_pages(message, state, pages, from_db=True)
 
 # Ловим и ТЕКСТ, и ГОЛОС одной функцией
-@router.message(WorkoutRequest.waiting_for_wishes, F.text | F.voice)
-async def process_workout_wishes(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
+# ИСПРАВЛЕНА ОШИБКА ЗДЕСЬ: заменено waiting_for_wishes на waiting_for_weights
+@router.message(WorkoutRequest.waiting_for_weights, F.text | F.voice)
+async def process_workout_weights(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
     
     # 1. Проверка лимитов
     user = await UserCRUD.get_user(session, message.from_user.id)
     if not user or user.workout_limit <= 0:
-        await message.answer("❌ <b>Лимит генераций тренировок исчерпан.</b>", parse_mode="HTML")
+        await message.answer("❌ <b>Лимит генераций исчерпан.</b>", parse_mode="HTML")
         return
 
     status_msg = await message.answer("⏳ <i>Обрабатываю данные...</i>", parse_mode="HTML")
@@ -665,16 +667,17 @@ async def process_workout_wishes(message: Message, session: AsyncSession, state:
     if message.voice:
         file_id = message.voice.file_id
         file = await bot.get_file(file_id)
-        temp_filename = f"voice_{message.from_user.id}.ogg"
+        temp_filename = f"voice_workout_{message.from_user.id}.ogg"
         
         await bot.download_file(file.file_path, temp_filename)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1) # Даем системе микросекунду на сохранение
 
         try:
-            segments, _ = whisper_model.transcribe(temp_filename, beam_size=5, language="ru")
-            input_text = "".join([segment.text for segment in segments]).strip()
+            manager = AIManager()
+            # Используем облачный Groq вместо локального Whisper!
+            input_text = await manager.transcribe_voice(temp_filename)
         except Exception as e:
-            print(f"Ошибка Whisper: {e}")
+            print(f"Ошибка транскрибации: {e}")
         finally:
             if os.path.exists(temp_filename):
                 os.remove(temp_filename)
@@ -695,13 +698,9 @@ async def process_workout_wishes(message: Message, session: AsyncSession, state:
     # 4. ОБЩАЯ ЧАСТЬ: ОТПРАВКА В ИИ И СОХРАНЕНИЕ
     # ==========================================
     try:
-        # Списываем лимит
-        await UserCRUD.reduce_limit(session, message.from_user.id, 'workout')
-        
         state_data = await state.get_data()
         workout_type = state_data.get("workout_type", "Тренировка")
 
-        # Твой ультимативный промпт
         parse_prompt = (
             "Ты — строгий фитнес-аналитик. Твоя задача: привести упражнение к ЕДИНОМУ СТАНДАРТУ для базы данных.\n\n"
             "ПРАВИЛА КАНОНИЧНОГО НАЗВАНИЯ:\n"
@@ -716,6 +715,7 @@ async def process_workout_wishes(message: Message, session: AsyncSession, state:
         )
         
         manager = AIManager()
+        # Вызываем ИИ
         ai_response = await manager.get_chat_response([{"role": "user", "content": parse_prompt}], {})
         
         # Парсим железобетонно
@@ -723,12 +723,14 @@ async def process_workout_wishes(message: Message, session: AsyncSession, state:
         saved_exercises = []
         
         for line in lines:
+            if '|' not in line: continue # Пропускаем пустые строки
             parts = line.split('|')
             if len(parts) >= 5:
                 try:
                     orig_name = parts[0].strip()
                     canon_name = parts[1].strip()
                     
+                    # Извлекаем числа (регулярки)
                     weight_match = re.search(r"[\d\.]+", parts[2].strip().replace(',', '.'))
                     weight = float(weight_match.group(0)) if weight_match else 0.0
                     
@@ -738,6 +740,7 @@ async def process_workout_wishes(message: Message, session: AsyncSession, state:
                     sets_match = re.search(r"\d+", parts[4].strip())
                     sets = int(sets_match.group(0)) if sets_match else 1
                     
+                    # СОХРАНЕНИЕ В БАЗУ
                     new_log = WorkoutLog(
                         user_id=message.from_user.id,
                         workout_type=workout_type, 
@@ -745,24 +748,32 @@ async def process_workout_wishes(message: Message, session: AsyncSession, state:
                         canonical_name=canon_name,
                         weight=weight,
                         reps=reps,
-                        sets=sets
+                        sets=sets,
+                        date=datetime.datetime.now() # Добавил дату, чтобы дневник видел записи
                     )
                     session.add(new_log)
                     saved_exercises.append(f"🔹 <b>{canon_name}</b>\n└ {weight}кг x {reps} (подходов: {sets})")
                 except Exception as parse_err:
-                    print(f"⚠️ Ошибка парсинга: {line} | {parse_err}")
+                    print(f"⚠️ Ошибка парсинга строки: {line} | {parse_err}")
                     continue
         
+        # Фиксируем изменения в базе
         await session.commit()
         
+        # Списываем лимит только при успешной записи
+        if saved_exercises and not is_admin(message.from_user.id):
+            user.workout_limit -= 1
+            await session.commit()
+
+        # Формируем ответ пользователю
         if saved_exercises:
             result_text = "✨ <b>Записано в дневник:</b>\n\n" + "\n\n".join(saved_exercises)
             result_text += "\n\n<i>✍️ Пиши/диктуй дальше или нажми «Завершить»</i>"
-        else:
-            result_text = "❌ Не удалось распознать упражнение. Напиши четче (напр: Жим лежа 80 10)."
             
-        await status_msg.edit_text(result_text, parse_mode="HTML")
+            await status_msg.edit_text(result_text, parse_mode="HTML")
+        else:
+            await status_msg.edit_text("❌ Не удалось распознать упражнение. Попробуй еще раз.")
 
     except Exception as e:
         print(f"❌ Критическая ошибка ИИ: {e}")
-        await status_msg.edit_text("🔧 Произошла ошибка при обработке данных.")    
+        await status_msg.edit_text("🔧 Ошибка при обработке данных.")    

@@ -1,3 +1,5 @@
+import os
+import asyncio
 import datetime
 import time
 import json
@@ -319,9 +321,19 @@ async def process_nutrition_input(message: Message, session: AsyncSession, state
     
     try:
         if message.voice:
-            voice_file_info = await bot.get_file(message.voice.file_id)
-            voice_bytes = await bot.download_file(voice_file_info.file_path)
-            user_text = await manager.transcribe_voice(voice_bytes)
+            file_id = message.voice.file_id
+            file = await bot.get_file(file_id)
+            temp_filename = f"voice_nut_{message.from_user.id}.ogg"
+            
+            # Сохраняем физически на диск, чтобы Groq не ловил пустые байты
+            await bot.download_file(file.file_path, temp_filename)
+            await asyncio.sleep(0.1)
+            
+            user_text = await manager.transcribe_voice(temp_filename)
+            
+            # Удаляем мусор за собой
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
         else:
             user_text = message.text
 

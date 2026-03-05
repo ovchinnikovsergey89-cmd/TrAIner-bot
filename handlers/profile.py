@@ -350,16 +350,19 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     user_id = callback.from_user.id
     user = await UserCRUD.get_user(session, user_id)
     
+    # 🚨 ВАЖНО: У тебя здесь стояла проверка на подписку (sub_level < 2).
+    # Я оставил ее, как было. Если дневник должен быть у всех, просто удали эти 4 строки:
     from handlers.admin import is_admin
-    # Проверяем подписку: доступно только для standard и ultra тарифов
-    user_sub = user.subscription_level or "free"
-    if not is_admin(user_id) and user_sub in ["free", "lite"]:
-        await callback.answer("📖 Дневник рабочих весов доступен только на тарифах Standard и Ultra!", show_alert=True)
+    if not is_admin(user_id) and user.subscription_level in ["free", "lite", None]:
+        await callback.answer("📖 Дневник рабочих весов доступен начиная с тарифа Standard!", show_alert=True)
         return
-    # ... старый код вывода дневника ...
     
-    # Достаем все записи пользователя, сортируем от новых к старым
-    stmt = select(ExerciseLog).where(ExerciseLog.user_id == user_id).order_by(desc(ExerciseLog.date))
+    # ИСПРАВЛЕНО: Теперь читаем из WorkoutLog, а не ExerciseLog
+    stmt = select(WorkoutLog).where(
+        WorkoutLog.user_id == user_id,
+        WorkoutLog.weight > 0 # Берем только те записи, где реально есть вес
+    ).order_by(desc(WorkoutLog.date))
+    
     result = await session.execute(stmt)
     logs = result.scalars().all()
     
@@ -370,8 +373,13 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     # Оставляем только самую последнюю запись для каждого упражнения
     latest_logs = {}
     for log in logs:
-        # Название приводим к нижнему регистру для проверки, чтобы "Жим" и "жим" считались одним и тем же
-        name_key = log.exercise_name.lower().strip()
+        # Используем canonical_name, если оно есть, иначе exercise_name
+        name = log.canonical_name if log.canonical_name else log.exercise_name
+        
+        if not name:
+            continue # Пропускаем пустые названия
+
+        name_key = name.lower().strip()
         if name_key not in latest_logs:
             latest_logs[name_key] = log
             
@@ -381,14 +389,16 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     for log in latest_logs.values():
         date_str = log.date.strftime("%d.%m") # Формат даты: 26.02
         
-                # Убираем ".0", если вес целое число (например, 80.0 -> 80)
-        weight_display = int(log.weight) if log.weight == int(log.weight) else log.weight
+        # Убираем ".0", если вес целое число (например, 80.0 -> 80)
+        weight_display = int(log.weight) if log.weight.is_integer() else log.weight
         
-        text += f"🏋️‍♂️ <b>{log.exercise_name.capitalize()}:</b> {weight_display} кг х {log.reps} <i>({date_str})</i>\n"
+        name = log.canonical_name if log.canonical_name else log.exercise_name
+        
+        text += f"🏋️‍♂️ <b>{name.capitalize()}:</b> {weight_display} кг х {log.reps} <i>({date_str})</i>\n"
         
     text += "\n<i>💡 Чтобы обновить результат или исправить ошибку, просто запиши новый вес для этого упражнения на тренировке.</i>"
     
-    # Кнопка возврата в профиль (используем уже готовую и надежную логику)
+    # Кнопка возврата в профиль
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="close_edit_menu")]
     ])

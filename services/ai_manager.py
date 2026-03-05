@@ -1,20 +1,31 @@
-from groq import AsyncGroq
-from config import Config
 import io
+import os
 import logging
 import datetime
 import re
 from datetime import timedelta
+import asyncio
 from openai import AsyncOpenAI
 from config import Config
 from utils.text_tools import clean_text
 
+# --- НОВОЕ: ИМПОРТИРУЕМ ЛОКАЛЬНЫЙ WHISPER ---
+from faster_whisper import WhisperModel
+
 logger = logging.getLogger(__name__)
+
+# 🔥 ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ: Загружаем модель ОДИН РАЗ при старте.
+# compute_type="int8" сильно снизит нагрузку на процессор и оперативку VDS!
+try:
+    whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+except Exception as e:
+    logger.error(f"Не удалось загрузить Whisper: {e}")
+    whisper_model = None
 
 class AIManager:
     """
-    Единый менеджер для работы с AI (DeepSeek).
-    Отвечает за генерацию тренировок, питания и анализ прогресса.
+    Единый менеджер для работы с AI.
+    Отвечает за генерацию тренировок, питания, анализ прогресса и распознавание голоса.
     """
     def __init__(self):
         self.api_key = Config.DEEPSEEK_API_KEY
@@ -23,32 +34,22 @@ class AIManager:
         
         if self.api_key:
             try:
-                from openai import AsyncOpenAI
                 self.client = AsyncOpenAI(
                     api_key=self.api_key,
                     base_url="https://api.deepseek.com"
                 )
             except Exception as e:
-                import logging
-                logging.error(f"AI Generation Error: {e}")
-                # Возвращаем понятную ошибку вместо падения
-                return ["❌ <b>Сервер тренера перегружен.</b>\n\nПожалуйста, попробуй еще раз через минуту."]
+                logger.error(f"AI Generation Error: {e}")
+                self.client = None
+
     # --- ТЕХНИЧЕСКИЙ МЕТОД: РАЗДЕЛЕНИЕ НА СТРАНИЦЫ ---
     def _smart_split(self, text: str) -> list[str]:
-        # Очищаем текст общим чистильщиком
         text = clean_text(text)
-        
-        # Разрезаем текст по нашему тегу
         pages = text.split("===PAGE_BREAK===")
-        
-        # Убираем пустые куски и лишние пробелы
         final_pages = [p.strip() for p in pages if len(p.strip()) > 5]
-        
-        # Если вдруг ИИ не прислал тег, возвращаем весь текст одной страницей
         return final_pages if final_pages else [text]
     
     # --- 1. АНАЛИЗ ПРОГРЕССА ---
-    # ВАЖНО: Добавлен аргумент workouts_count=0
     async def analyze_progress(self, user_data: dict, current_weight: float, workouts_count: int = 0) -> str:
         if not self.client: return "Ошибка API: Ключ не настроен"
         
@@ -60,15 +61,9 @@ class AIManager:
         
         prompt = f"""
         Ты — элитный фитнес-коуч. Проанализируй прогресс клиента {name}.
-        
-        ДАННЫЕ:
-        - Вес: {old_weight} кг -> {current_weight} кг (Разница: {diff:.1f} кг). 
-        - Цель: {goal}.
-        - План тренировок: {plan_days} раз в неделю.
-        - Выполнено тренировок: {workouts_count}.
-
+        ДАННЫЕ: Вес: {old_weight} кг -> {current_weight} кг (Разница: {diff:.1f} кг). Цель: {goal}.
+        План тренировок: {plan_days} раз в неделю. Выполнено тренировок: {workouts_count}.
         ТВОЯ ЗАДАЧА: Дай краткий анализ динамики.
-        
         СТРОГИЙ ФОРМАТ ОТВЕТА (HTML):
         1. Первая строка: Эмодзи + вердикт.
         2. Вторая строка: ОБЯЗАТЕЛЬНО ПУСТАЯ СТРОКА.
@@ -78,15 +73,11 @@ class AIManager:
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model=self.model, temperature=0.7,
-                timeout=90.0
+                model=self.model, temperature=0.7, timeout=90.0
             )
-            from utils.text_tools import clean_text
             return clean_text(r.choices[0].message.content)
         except Exception: 
             return "📈 <b>Данные обновлены!</b>\n\nТренер зафиксировал новый вес и активность."
-
-    # ... (остальные методы: generate_workout_pages и т.д.)
 
     # --- 2. ГЕНЕРАЦИЯ ТРЕНИРОВКИ ---
     async def generate_workout_pages(self, user_data: dict) -> list[str]:
@@ -104,62 +95,32 @@ class AIManager:
 
         user_prompt = f"""
         СОСТАВЬ ПЕРСОНАЛЬНЫЙ ПЛАН ТРЕНИРОВОК.
-        
-        АНКЕТА КЛИЕНТА:
-        - Имя: {user_data.get('name')}
-        - Пол: {user_data.get('gender')}
-        - Возраст: {user_data.get('age')} лет
-        - Вес: {user_data.get('weight')} кг
-        - Рост: {user_data.get('height')} см
-        - Цель: {goal}
-        - Уровень подготовки: {level}
-        - График: {days_per_week} тренировок в неделю
-        - Пожелания: {user_data.get('wishes')}
-
-        ТВОЯ РОЛЬ: Ты — топовый эксперт-тренер. Твоя задача — составить программу, которая учитывает ИМТ и возраст клиента без лишних слов.
+        АНКЕТА КЛИЕНТА: Имя: {user_data.get('name')}, Пол: {user_data.get('gender')}, Возраст: {user_data.get('age')} лет, Вес: {user_data.get('weight')} кг, Рост: {user_data.get('height')} см, Цель: {goal}, Уровень: {level}, График: {days_per_week} тр/нед, Пожелания: {wishes}
 
         ЛОГИКА ИНДИВИДУАЛЬНОСТИ:
-        1. Если вес большой (ИМТ > 28) — ЗАПРЕЩЕНЫ прыжки и осевые нагрузки. Пиши: "Бережем суставы: выполняй плавно".
-        2. Если клиент — новичок — акцент на нейромышечную связь. В технике пиши: "Почувствуй, как работает целевая мышца".
-        3. Если цель — набор массы — в каждом упражнении пиши про "Прогрессию весов".
-        4. Если возраст 40+ — добавь больше внимания разминке и контролю давления.
-        5. Всегда строго придерживайся локации и условий, указанных в истории пожеланий. Если первая тренировка была на улице, все последующие изменения тоже должны быть для улицы, если не указано иное.
+        1. ИМТ > 28 — ЗАПРЕЩЕНЫ прыжки.
+        2. Новичок — акцент на нейромышечную связь.
+        3. Набор массы — "Прогрессия весов".
+        4. 40+ лет — разминка и контроль давления.
+        5. Строго придерживайся локации из пожеланий.
         
-        МЕТОДОЛОГИЯ РАСПРЕДЕЛЕНИЯ (Выбери подходящую под {days_per_week} дн.):
-        - 1 день: Full Body (база на всё тело).
-        - 2 дня: Upper/Lower (Верх / Низ).
-        - 3 дня: Classic Push/Pull/Legs (Жим / Тяга / Ноги).
-        - 4 дня: Upper/Lower Split (2 раза Верх + 2 раза Низ).
-        - 5 дней: Bro-Split (одна группа мышц в день).
-        - 6 дней: Push/Pull/Legs (2 полных круга).
-        - 7 дней: 5-6 силовых + активное восстановление (LISS/растяжка).
-
-        ЗАДАЧА: Создай программу на СЕМЬ ДНЕЙ (недельный цикл), которая строго учитывает физические данные. 
-        Из них должно быть ровно {days_per_week} тренировочных дней и {7 - days_per_week} дня отдыха.
-        Распредели их логично (например, не ставь 4 тяжелых дня подряд).
-        Распредели тренировки, начиная с СЕГОДНЯ ({today_name} {today_date}) 
+        ЗАДАЧА: Создай программу на СЕМЬ ДНЕЙ. Ровно {days_per_week} тренировочных дней.
+        Начиная с СЕГОДНЯ ({today_name} {today_date}).
         
         СТРОГИЕ ПРАВИЛА ОФОРМЛЕНИЯ:
-        1. СРАЗУ начинай с программы тренировок по дням.
-        2. Формат заголовка для отдыха: 📅 <b>[Дата], День [Номер] ([День недели]) — ВОССТАНОВЛЕНИЕ</b>
-        3. Между упражнениями ОБЯЗАТЕЛЬНО ПУСТАЯ СТРОКА.
-        4. ЗАПРЕЩЕНО писать вступление, анализ ИМТ, расчеты калорий или принципы плана в самом начале.
-        5. СРАЗУ начинай с программы тренировок по дням.
-        6. Формат упражнения:
+        1. СРАЗУ начинай с программы по дням. Формат отдыха: 📅 <b>[Дата], День [Номер] ([День недели]) — ВОССТАНОВЛЕНИЕ</b>
+        2. Формат упражнения:
         <b>[Номер]. [Название]</b>
         <i>[Сеты] х [Повторы] (Отдых [сек])</i>
         Техника: [Короткий совет]
-        7. 4. В дни ВОССТАНОВЛЕНИЯ: вместо упражнений дай 1-2 конкретных совета по активности (например: находить 10 000 шагов, сделать легкое кардио, растяжку, МФР или поплавать в бассейне).
-        8. В САМОМ КОНЦЕ (на последней странице после всех дней) добавь блок "💡 Советы тренера".
-        9. В советах ОЧЕНЬ КРАТКО (3-4 пункта) укажи рекомендации по питанию и технике, основываясь на данных клиента. заместо "*" ставь "-"
-        
+        3. В дни ВОССТАНОВЛЕНИЯ: 1-2 совета по активности.
+        4. В САМОМ КОНЦЕ добавь "💡 Советы тренера" (3-4 пункта).
         Разделяй дни СТРОГО тегом: ===PAGE_BREAK===
         """
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": user_prompt}], 
-                model=self.model, temperature=0.3,
-                timeout=90.0
+                model=self.model, temperature=0.3, timeout=90.0
             )
             return self._smart_split(r.choices[0].message.content)
         except Exception:
@@ -168,87 +129,56 @@ class AIManager:
     # --- НОВОЕ: ГЕНЕРАЦИЯ РАЗОВОЙ ТРЕНИРОВКИ ---
     async def generate_single_workout(self, user_data: dict) -> str:
         if not self.client: return "❌ Ошибка API"
-        
         level = user_data.get('workout_level', 'beginner')
         goal = user_data.get('goal', 'maintenance')
         wishes = user_data.get('wishes', 'Стандартная тренировка')
 
         user_prompt = f"""
         СОСТАВЬ ОДНУ РАЗОВУЮ ТРЕНИРОВКУ.
-        
-        АНКЕТА: Имя: {user_data.get('name')}, Пол: {user_data.get('gender')}, Возраст: {user_data.get('age')}, Вес: {user_data.get('weight')} кг, Цель: {goal}, Уровень: {level}.
-        УСЛОВИЯ/ПОЖЕЛАНИЯ СЕГОДНЯ: {wishes}
+        АНКЕТА: Имя: {user_data.get('name')}, Вес: {user_data.get('weight')} кг, Цель: {goal}, Уровень: {level}.
+        УСЛОВИЯ СЕГОДНЯ: {wishes}
 
-        ЗАДАЧА: Напиши одну конкретную тренировку, строго подстроенную под пожелания клиента (инвентарь, время, ограничения).
-        
-        СТРОГИЕ ПРАВИЛА:
-        1. Сразу начинай с программы. Никаких "Привет, вот твоя тренировка".
-        2. Формат:
+        Формат:
         <b>[Номер]. [Название]</b>
         <i>[Сеты] х [Повторы] (Отдых [сек])</i>
         Техника: [Короткий совет]
-        3. В конце дай один мотивирующий совет.
         """
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": user_prompt}], 
-                model=self.model, temperature=0.5,
-                timeout=60.0
+                model=self.model, temperature=0.5, timeout=60.0
             )
             return r.choices[0].message.content
         except Exception:
             return "❌ Ошибка при составлении тренировки."    
 
-    # --- 3. ГЕНЕРАЦИЯ ПИТАНИЯ (3 ВАРИАНТА + ПЕРЕКУСЫ + СПИСОК) ---
+    # --- 3. ГЕНЕРАЦИЯ ПИТАНИЯ ---
     async def generate_nutrition_pages(self, user_data: dict) -> list[str]:
         if not self.client: return ["❌ Ошибка API"]
         goal = user_data.get('goal', 'maintenance')
-        # Достаем пожелания (если их нет, будет 'Нет')
         wishes = user_data.get('wishes', 'Нет особых предпочтений')
         
         prompt = f"""
-        Ты — профессиональный фитнес-диетолог. Твоя задача — рассчитать КБЖУ и составить рацион. 
+        Ты — фитнес-диетолог. Составь рацион. 
+        ДАННЫЕ: Вес: {user_data.get('weight')} кг, Рост: {user_data.get('height')} см, Цель: {goal}, Пожелания: {wishes}
         
-        ДАННЫЕ КЛИЕНТА: 
-        - Вес: {user_data.get('weight')} кг, Рост: {user_data.get('height')} см
-        - Возраст: {user_data.get('age')} лет, Пол: {user_data.get('gender')}
-        - Цель: {goal}
-        - Пожелания/Ограничения: {wishes}
-
         ЗАДАЧА:
-        1. На основе веса и пожеланий (например, если просят 2.2г белка на кг веса — рассчитай строго так) РАССЧИТАЙ суточную норму калорий и диапазоны БЖУ.
-        2. Составь меню на день: Завтрак, Обед, Ужин, Перекусы. В каждом блоке предложи по 3 варианта.
+        1. РАССЧИТАЙ КБЖУ.
+        2. Меню на день: Завтрак, Обед, Ужин, Перекусы. По 3 варианта.
 
-        СТРОЖАЙШЕЕ ПРАВИЛО ОФОРМЛЕНИЯ КАЖДОЙ СТРАНИЦЫ:
-        Каждая страница (каждый блок приема пищи) ОБЯЗАТЕЛЬНО должна начинаться с этого заголовка:
-        <b>Твой КБЖУ ~[Число] ккал (Б: [мин]-[макс], Ж: [мин]-[макс], У: [мин]-[макс])</b>
+        СТРОЖАЙШЕЕ ПРАВИЛО:
+        Каждая страница начинается с: <b>Твой КБЖУ ~[Число] ккал (Б: [мин]-[макс], Ж: [мин]-[макс], У: [мин]-[макс])</b>
         
-        ИНДИВИДУАЛЬНАЯ СТРАТЕГИЯ:
-        1. Если вес выше нормы — делай упор на продукты с низким гликемическим индексом.
-        
-        ТРЕБОВАНИЯ К КОНТЕНТУ:
-        1. Для КАЖДОГО блока (Завтрак, Обед, Ужин, Перекусы) предоставь ровно 3 РАЗНЫХ варианта на выбор.
-        2. Указывай точные ингредиенты в граммах и КБЖУ для каждого варианта.
-        3. В конце добавь расширенный список продуктов на неделю (Shopping List).
-        
-        СТРОГИЕ ПРАВИЛА ОФОРМЛЕНИЯ:
-        1. Между вариантами блюд (включая ПЕРЕКУСЫ) ОБЯЗАТЕЛЬНО делай ПУСТУЮ СТРОКУ для читабельности.
-        2. Используй HTML (<b>, <i>). Без вступлений.
-        3. Разделяй блоки (Завтрак, Обед, Ужин, Перекусы, Список покупок) СТРОГО тегом: ===PAGE_BREAK===
-        4. Пишешь: (<i> Твой КБЖУ 
-        5. - После заголовка КБЖУ на каждой странице идет (отспуп строки) далее, название приема пищи (например, 🍳 ЗАВТРАК) и далее 3 варианта.
-
         ФОРМАТ ВАРИАНТА:
         Вариант X: <b>[Название]</b>
         - [Ингредиенты с весом]
         - <b>КБЖУ: ~[ккал] (Б:..г, Ж:..г, У:..г)</b>
-        - Разделяй приемы пищи тегом ===PAGE_BREAK===.
+        Разделяй приемы пищи тегом ===PAGE_BREAK===. В конце добавь Shopping List.
         """
         try:
             r = await self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}], 
-                model=self.model, temperature=0.4,
-                timeout=90.0
+                model=self.model, temperature=0.4, timeout=90.0
             )
             return self._smart_split(r.choices[0].message.content)
         except Exception:
@@ -263,17 +193,13 @@ class AIManager:
             gender = user_data.get('gender', 'male')
             goal = user_data.get('goal', 'maintenance')
 
-            if gender == 'male':
-                bmr = 10 * w + 6.25 * h - 5 * a + 5
-            else:
-                bmr = 10 * w + 6.25 * h - 5 * a - 161
+            if gender == 'male': bmr = 10 * w + 6.25 * h - 5 * a + 5
+            else: bmr = 10 * w + 6.25 * h - 5 * a - 161
             
             target = int(bmr * 1.375)
-
             if goal == 'weight_loss': target -= 400
             elif goal == 'muscle_gain': target += 300
             elif goal == 'recomposition': target -= 150
-            
             return max(target, 1200) 
         except Exception: 
             return 2000
@@ -285,54 +211,63 @@ class AIManager:
         name = user_context.get('name', 'атлет')
         goal = user_context.get('goal', 'фитнес')
         
-        # Упрощаем промпт до предела, чтобы ИИ не боялся отвечать
         system_prompt = (
             f"Ты — тренер TrAIner. Твой клиент: {name}, цель: {goal}. "
-            "Отвечай на ВСЕ вопросы. Если спрашивают про боль — дай совет по отдыху. "
-            "Если спрашивают 'работаем?' — предлагай тренировку. "
-            "НЕ используй символы #, *, _ и сложные теги. Пиши простым текстом."
+            "Отвечай на ВСЕ вопросы. Пиши простым текстом без звездочек."
         )
 
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "system", "content": system_prompt}] + history[-6:],
-                temperature=0.7,
-                timeout=60.0 # Ждем до минуты
+                temperature=0.7, timeout=30.0
             )
-            
             result = response.choices[0].message.content
-            if not result:
-                return "Я тут, готов к работе! О чем хочешь поговорить?"
-            
-            # Очищаем текст от Markdown-звездочек, которые ломают Telegram
-            result = result.replace("*", "").replace("#", "")
-            return result
+            if not result: return "Я тут, готов к работе!"
+            return result.replace("*", "").replace("#", "")
         except Exception as e:
             logger.error(f"DeepSeek Error: {e}")
-            return f"Ошибка связи с ИИ: {str(e)}"
+            return f"❌ Ошибка связи с ИИ. Попробуй еще раз."
         
-    # --- НОВОЕ: РАСПОЗНАВАНИЕ ГОЛОСА (STT) ---
-    async def transcribe_voice(self, voice_data) -> str:
+    # --- 6. НОВОЕ: БЕЗОПАСНОЕ РАСПОЗНАВАНИЕ ГОЛОСА (ЛОКАЛЬНО В ФОНЕ) ---
+    async def transcribe_voice(self, file_data) -> str:
+        """
+        Берет аудиофайл, запускает Whisper в фоновом потоке (чтобы не блокировать бота),
+        и возвращает текст. Блокировок по IP больше не боимся!
+        """
+        if not whisper_model:
+            return ""
+            
         try:
-            groq_client = AsyncGroq(api_key=Config.GROQ_API_KEY)
-            
-            # Если прилетели просто байты, превращаем их в файлоподобный объект
-            if isinstance(voice_data, bytes):
-                audio_file = io.BytesIO(voice_data)
+            if isinstance(file_data, str):
+                file_path = file_data
+                
+                # 🔥 МАГИЯ: Запускаем тяжелую нейросеть в ОТДЕЛЬНОМ потоке
+                def run_transcription():
+                    segments, _ = whisper_model.transcribe(file_path, beam_size=5, language="ru")
+                    return "".join([segment.text for segment in segments]).strip()
+
+                transcription_text = await asyncio.to_thread(run_transcription)
+                return transcription_text
+                
+            # Защита на случай, если какой-то хендлер всё ещё передает байты
+            elif isinstance(file_data, io.BytesIO):
+                import tempfile
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
+                    tmp.write(file_data.read())
+                    tmp_path = tmp.name
+                    
+                def run_transcription_bytes():
+                    segments, _ = whisper_model.transcribe(tmp_path, beam_size=5, language="ru")
+                    return "".join([segment.text for segment in segments]).strip()
+                    
+                transcription_text = await asyncio.to_thread(run_transcription_bytes)
+                os.remove(tmp_path)
+                return transcription_text
+                
             else:
-                audio_file = voice_data
-            
-            # Обязательно даем имя с расширением для корректного парсинга кодеками
-            audio_file.name = "voice.ogg" 
-            
-            transcription = await groq_client.audio.transcriptions.create(
-                file=audio_file,
-                model="whisper-large-v3",
-                language="ru", 
-                response_format="json"
-            )
-            return transcription.text
+                return ""
+                
         except Exception as e:
             logger.error(f"Ошибка распознавания голоса: {e}")
-            return ""    
+            return ""
