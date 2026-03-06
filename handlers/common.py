@@ -1,6 +1,5 @@
-from aiogram import Router, types
-from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram import Router, types, F
+from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -18,11 +17,14 @@ class VideoState(StatesGroup):
 
 # --- ОТМЕНА (Универсальная) ---
 @router.message(Command("cancel"))
-@router.message(F.text.casefold() == "отмена")
+@router.message(F.text.lower().in_([
+    "отмена", "назад", "выход", "стоп", 
+    "🔙 назад", "🔙 вернуться в меню", "отменить"
+]), StateFilter("*")) # Добавили StateFilter("*") - перехват в любом состоянии
 async def cmd_cancel(message: Message, state: FSMContext):
     current_state = await state.get_state()
     
-    # Очищаем состояние (это выведет юзера из поиска видео или из пожеланий AI)
+    # Очищаем состояние
     await state.clear()
     
     if current_state is None:
@@ -35,6 +37,27 @@ async def cmd_cancel(message: Message, state: FSMContext):
             "🚫 Действие отменено. Возвращаюсь в меню.", 
             reply_markup=get_main_menu()
         )
+
+# ==========================================
+# УНИВЕРСАЛЬНЫЙ ПЕРЕХВАТЧИК INLINE-КНОПОК
+# ==========================================
+@router.callback_query(F.data.in_([
+    "back", "close", "cancel", "back_to_main", "close_edit_menu"
+]), StateFilter("*")) # Звездочка позволяет ловить кнопку В ЛЮБОМ состоянии!
+async def universal_cancel_callback(callback: CallbackQuery, state: FSMContext):
+    # 1. Сбрасываем любые зависшие состояния (ожидание веса, возраста и т.д.)
+    current_state = await state.get_state()
+    if current_state is not None:
+        await state.clear() 
+        
+    # 2. Пытаемся красиво удалить старое сообщение с кнопками
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass # Игнорируем ошибку, если сообщение уже нельзя удалить
+        
+    # 4. Гасим "часики" загрузки на самой кнопке
+    await callback.answer()
 
 # --- ВХОД В ПОИСК (Эту оставляем без изменений) ---
 async def start_search_logic(message: Message, state: FSMContext):

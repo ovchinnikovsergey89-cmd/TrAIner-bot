@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select, desc
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
-from faster_whisper import WhisperModel
 from handlers.admin import is_admin
 from utils.text_tools import clean_text
 from database.crud import UserCRUD
@@ -22,10 +21,9 @@ from services.ai_manager import AIManager
 from states.workout_states import WorkoutPagination, WorkoutRequest
 from keyboards.pagination import get_pagination_kb
 from database.models import WorkoutLog, ExerciseLog
+from datetime import timedelta
 
 router = Router()
-
-whisper_model = WhisperModel("base", device="cpu", compute_type="default")
 
 # ==========================================
 # 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -465,31 +463,40 @@ async def noop_btn(callback: CallbackQuery):
 @router.callback_query(F.data == "workout_done")
 async def process_workout_done(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     user_id = callback.from_user.id
-    
-    # --- 🛡 ЗАЩИТА ОТ НАКРУТКИ (1 тренировка в 12 часов) ---
-    stmt = select(WorkoutLog).where(WorkoutLog.user_id == user_id).order_by(WorkoutLog.date.desc()).limit(1)
-    result = await session.execute(stmt)
-    last_log = result.scalar_one_or_none()
+    now = datetime.datetime.now()
 
-    if last_log:
-        time_diff = datetime.datetime.now() - last_log.date
-        # 12 часов = 43200 секунд
-        if time_diff.total_seconds() < 43200:
-            hours_left = int((43200 - time_diff.total_seconds()) / 3600)
-            await callback.answer(f"⏳ Ты уже тренировался сегодня!\nСледующую можно отметить через {hours_left} ч.", show_alert=True)
+    # 1. ПРОВЕРКА 12 ЧАСОВ: Ищем последнюю запись именно О ЗАВЕРШЕНИИ тренировки
+    stmt = select(WorkoutLog).where(
+        WorkoutLog.user_id == user_id,
+        WorkoutLog.workout_type.like("Тренировка День%") # Ищем только отметки о выполнении дня
+    ).order_by(WorkoutLog.date.desc()).limit(1)
+    
+    result = await session.execute(stmt)
+    last_workout = result.scalar_one_or_none()
+
+    if last_workout:
+        time_diff = now - last_workout.date
+        if time_diff < timedelta(hours=12):
+            hours_left = 12 - (time_diff.total_seconds() // 3600)
+            await callback.answer(f"⚠️ Отметить тренировку можно раз в 12 часов. Подожди еще {int(hours_left)} ч.", show_alert=True)
             return
     # -------------------------------------------------------
 
+    # 2. Логика сохранения завершенной тренировки
     data = await state.get_data()
     current_page = data.get("current_page", 0)
     pages = data.get("workout_pages", [])
     completed_days = data.get("completed_days", [])
-    
-    # Сохраняем в БД
+
+    if current_page not in completed_days:
+        completed_days.append(current_page)
+        await state.update_data(completed_days=completed_days)
+
+    # 3. Записываем в БД факт выполнения всего дня
     new_log = WorkoutLog(
         user_id=user_id,
-        date=datetime.datetime.now(),
-        workout_type=f"День {current_page + 1}"
+        workout_type=f"Тренировка День {current_page + 1}",
+        date=now
     )
     session.add(new_log)
     await session.commit()
@@ -500,6 +507,10 @@ async def process_workout_done(callback: CallbackQuery, session: AsyncSession, s
         await state.update_data(completed_days=completed_days)
 
     await callback.answer("💪 Мощно! Тренировка засчитана!", show_alert=True)
+    
+    # 4. Обновляем сообщение (кнопка меняется на "Отменить выполнение")
+    if pages:
+        await show_workout_pages(callback.message, state, pages, from_db=True, completed_days_direct=completed_days)
     
     # Обновляем сообщение (ставим кнопку "Отменить")
     base_kb = get_pagination_kb(current_page, len(pages), page_type="workout")
@@ -665,16 +676,24 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
     # 2. ЕСЛИ ЭТО ГОЛОСОВОЕ СООБЩЕНИЕ
     # ==========================================
     if message.voice:
+        # 🔥 НОВОЕ: Защита от слишком длинных аудио (больше 60 секунд)
+        if message.voice.duration > 60:
+            await message.answer("⚠️ Голосовое слишком длинное! Пожалуйста, уложись в 1 минуту.")
+            return
+
         file_id = message.voice.file_id
         file = await bot.get_file(file_id)
         temp_filename = f"voice_workout_{message.from_user.id}.ogg"
         
+        # 🔥 НОВОЕ: Включаем статус "печатает...", пока идет загрузка и обработка
+        from aiogram.enums import ChatAction
+        await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+        
         await bot.download_file(file.file_path, temp_filename)
-        await asyncio.sleep(0.1) # Даем системе микросекунду на сохранение
+        await asyncio.sleep(0.1) 
 
         try:
             manager = AIManager()
-            # Используем облачный Groq вместо локального Whisper!
             input_text = await manager.transcribe_voice(temp_filename)
         except Exception as e:
             print(f"Ошибка транскрибации: {e}")
@@ -709,7 +728,7 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
             "   Пример: 'жим на наклонной 30 град' -> 'Жим штанги в наклоне 30'\n"
             "3. УДАЛЯЙ МУСОР: слова 'скамья', 'градусов', 'хваты', 'поочередно'.\n"
             "4. ТРЕНАЖЕРЫ: Смит, Хаммер заменяй на 'в тренажере'.\n\n"
-            "СТРОГОЕ ПРАВИЛО: Верни результат списком. Формат:\n"
+            "СТРОГОЕ ПРАВИЛО: Верни результат списком. НЕ ПИШИ ЗАГОЛОВОК ТАБЛИЦЫ, ВЫВОДИ ТОЛЬКО ДАННЫЕ. Формат:\n"
             "Оригинал | Каноничное | Вес | Повторы | Подходы\n"
             f"Текст: {input_text}"
         )
@@ -722,8 +741,17 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
         lines = ai_response.strip().split('\n')
         saved_exercises = []
         
+        # Парсим железобетонно
+        lines = ai_response.strip().split('\n')
+        saved_exercises = []
+        
         for line in lines:
             if '|' not in line: continue # Пропускаем пустые строки
+            
+            # 🔥 НОВАЯ СТРОКА: Игнорируем шапку таблицы от ИИ!
+            if "Каноничное" in line or "Вес" in line or "Оригинальное" in line:
+                continue
+                
             parts = line.split('|')
             if len(parts) >= 5:
                 try:

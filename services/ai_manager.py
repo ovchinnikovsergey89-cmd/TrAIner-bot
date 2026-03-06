@@ -5,6 +5,7 @@ import datetime
 import re
 from datetime import timedelta
 import asyncio
+from aiogram.enums import ChatAction
 from openai import AsyncOpenAI
 from config import Config
 from utils.text_tools import clean_text
@@ -159,21 +160,31 @@ class AIManager:
         wishes = user_data.get('wishes', 'Нет особых предпочтений')
         
         prompt = f"""
-        Ты — фитнес-диетолог. Составь рацион. 
-        ДАННЫЕ: Вес: {user_data.get('weight')} кг, Рост: {user_data.get('height')} см, Цель: {goal}, Пожелания: {wishes}
+        Ты — профессиональный фитнес-диетолог. Твоя задача — рассчитать КБЖУ и составить рацион. 
         
-        ЗАДАЧА:
-        1. РАССЧИТАЙ КБЖУ.
-        2. Меню на день: Завтрак, Обед, Ужин, Перекусы. По 3 варианта.
+        ДАННЫЕ КЛИЕНТА: 
+        - Вес: {user_data.get('weight')} кг, Рост: {user_data.get('height')} см
+        - Возраст: {user_data.get('age')} лет, Пол: {user_data.get('gender')}
+        - Цель: {goal}
+        - Пожелания/Ограничения: {wishes}
 
-        СТРОЖАЙШЕЕ ПРАВИЛО:
-        Каждая страница начинается с: <b>Твой КБЖУ ~[Число] ккал (Б: [мин]-[макс], Ж: [мин]-[макс], У: [мин]-[макс])</b>
+        ЗАДАЧА:
+        1. {wishes} - Это самое главное что нужно учитывать!
+        2. РАССЧИТАЙ суточную норму калорий и диапазоны БЖУ.
+        3. Составь меню на день: Завтрак, Обед, Ужин, Перекусы. В каждом блоке по 3 варианта. 
         
+        СТРОГИЕ ПРАВИЛА ОФОРМЛЕНИЯ (ЧИТАЙ ВНИМАТЕЛЬНО!):
+        1. СТРОГО, сразу начинай с заголовка.
+        2. При составлении списка продуктов, заголовок: <b>Список покупок:</b>, заместо "*" используй "-", разделяй белки жиры углеводы (используй пример: <b>Белки</b>, <b>Жиры</b>, <b>Углеводы</b> ) делай отступ строки между ними.
+        3. ЗАПРЕЩЕНО ставить ===PAGE_BREAK=== между вариантами одного и того же приема пищи! Варианты разделяй просто пустой строкой.
+        4. Каждая новая страница (Завтрак, Обед, Ужин, Перекусы) ОБЯЗАТЕЛЬНО начинается с заголовка: 
+        <b>Твой КБЖУ ~[Число] ккал (Б: [мин]-[макс], Ж: [мин]-[макс], У: [мин]-[макс])</b>
+        5. Каждый ингридиент с новой строки
         ФОРМАТ ВАРИАНТА:
         Вариант X: <b>[Название]</b>
         - [Ингредиенты с весом]
         - <b>КБЖУ: ~[ккал] (Б:..г, Ж:..г, У:..г)</b>
-        Разделяй приемы пищи тегом ===PAGE_BREAK===. В конце добавь Shopping List.
+        - Разделяй приемы пищи тегом ===PAGE_BREAK===. В конце добавь Shopping List.
         """
         try:
             r = await self.client.chat.completions.create(
@@ -232,8 +243,8 @@ class AIManager:
     # --- 6. НОВОЕ: БЕЗОПАСНОЕ РАСПОЗНАВАНИЕ ГОЛОСА (ЛОКАЛЬНО В ФОНЕ) ---
     async def transcribe_voice(self, file_data) -> str:
         """
-        Берет аудиофайл, запускает Whisper в фоновом потоке (чтобы не блокировать бота),
-        и возвращает текст. Блокировок по IP больше не боимся!
+        Берет аудиофайл, запускает Whisper в фоновом потоке,
+        отрезает тишину (vad_filter) и использует словарь терминов.
         """
         if not whisper_model:
             return ""
@@ -242,15 +253,20 @@ class AIManager:
             if isinstance(file_data, str):
                 file_path = file_data
                 
-                # 🔥 МАГИЯ: Запускаем тяжелую нейросеть в ОТДЕЛЬНОМ потоке
                 def run_transcription():
-                    segments, _ = whisper_model.transcribe(file_path, beam_size=5, language="ru")
+                    segments, _ = whisper_model.transcribe(
+                        file_path, 
+                        beam_size=5, 
+                        language="ru",
+                        initial_prompt="Жим лежа, присед, становая тяга, гантели, штанга, КБЖУ, спагетти, углеводы, калории, подход, повторения.",
+                        vad_filter=True, # 🔥 Отрезаем тишину
+                        vad_parameters=dict(min_silence_duration_ms=500)
+                    )
                     return "".join([segment.text for segment in segments]).strip()
 
                 transcription_text = await asyncio.to_thread(run_transcription)
                 return transcription_text
                 
-            # Защита на случай, если какой-то хендлер всё ещё передает байты
             elif isinstance(file_data, io.BytesIO):
                 import tempfile
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
@@ -258,7 +274,14 @@ class AIManager:
                     tmp_path = tmp.name
                     
                 def run_transcription_bytes():
-                    segments, _ = whisper_model.transcribe(tmp_path, beam_size=5, language="ru")
+                    segments, _ = whisper_model.transcribe(
+                        tmp_path, # Исправлена старая опечатка
+                        beam_size=5, 
+                        language="ru",
+                        initial_prompt="Жим лежа, присед, становая тяга, гантели, штанга, КБЖУ, спагетти, углеводы, калории, подход, повторения.",
+                        vad_filter=True, # 🔥 Отрезаем тишину
+                        vad_parameters=dict(min_silence_duration_ms=500)
+                    )
                     return "".join([segment.text for segment in segments]).strip()
                     
                 transcription_text = await asyncio.to_thread(run_transcription_bytes)

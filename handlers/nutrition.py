@@ -74,7 +74,7 @@ async def show_pages(message: Message, state: FSMContext, pages: list, from_db: 
 # --- ПРОСМОТР ---
 @router.message(F.text == "🍽 Мое меню")
 async def show_my_nutrition(message: Message, session: AsyncSession, state: FSMContext):
-    user = await UserCRUD.get_user(session, message.from_user.id)
+    user = await UserCRUD.get_user(session, message.chat.id) # <--- ВОТ И ВСЯ МАГИЯ!
     if not user:
         await message.answer("Сначала заполни профиль! (/start)")
         return
@@ -106,16 +106,26 @@ async def request_ai_nutrition(message: Message, session: AsyncSession, state: F
     if user.current_nutrition_program:
         confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Новое меню", callback_data="confirm_new_nutrition")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_nutrition")]
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")] # <--- ИСПРАВИЛИ ЗДЕСЬ
         ])
         await message.answer("Тренер уже составлял меню. Сделать новое?", reply_markup=confirm_kb)
     else:
         await ask_nutrition_wishes(message, state)
 
+# ==========================================
+# ОБРАБОТЧИК КНОПКИ "НОВОЕ МЕНЮ"
+# ==========================================
 @router.callback_query(F.data == "confirm_new_nutrition")
-async def confirm_generation(callback: CallbackQuery, state: FSMContext):
-    await callback.message.delete()
+async def process_confirm_new_nutrition(callback: CallbackQuery, state: FSMContext):
+    # Пытаемся удалить сообщение с вопросом, чтобы не мусорить в чате
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    
+    # Запускаем функцию ввода пожеланий (как если бы меню не было)
     await ask_nutrition_wishes(callback.message, state)
+    await callback.answer() # Гасим часики на кнопке
 
 @router.callback_query(F.data == "log_nutrition_press")
 async def start_log_nutrition(callback: CallbackQuery, state: FSMContext):
@@ -307,10 +317,23 @@ async def redirect_to_chat(callback: CallbackQuery, state: FSMContext):
     await start_chat_logic(callback.message, state)        
          
 # --- БЛОКИ ЗАПИСИ ПИТАНИЯ (ИИ ДНЕВНИК КБЖУ) ---
-@router.message(F.text == "🔙 Завершить запись", RecipeState.waiting_for_nutrition_data)
-async def exit_log_nutrition(message: Message, state: FSMContext):
-    await message.answer("✅ <b>Запись питания завершена.</b>\nДанные проанализированы и учтены!", reply_markup=get_main_menu(), parse_mode="HTML")
+# ==========================================
+# КНОПКА "ЗАВЕРШИТЬ ЗАПИСЬ"
+# ==========================================
+@router.message(F.text == "🔙 Завершить запись")
+async def stop_logging_nutrition(message: Message, session: AsyncSession, state: FSMContext):
+    # 1. Очищаем состояние (бот перестает ждать еду)
     await state.clear()
+    
+    # 2. Убираем клавиатуру ввода (ReplyKeyboardRemove) и пишем короткое сообщение
+    from aiogram.types import ReplyKeyboardRemove
+    temp_msg = await message.answer(
+        "✅ Запись в дневник завершена.", 
+        reply_markup=ReplyKeyboardRemove()
+    )
+    
+    # 3. Сразу же показываем раздел "Мое меню" (как будто юзер сам нажал эту кнопку)
+    await show_my_nutrition(message, session, state)
 
 @router.message(F.voice | F.text, RecipeState.waiting_for_nutrition_data)
 async def process_nutrition_input(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
@@ -321,17 +344,25 @@ async def process_nutrition_input(message: Message, session: AsyncSession, state
     
     try:
         if message.voice:
+            # 1. Защита от слишком длинных аудио (больше 60 секунд)
+            if message.voice.duration > 60:
+                await message.answer("⚠️ Голосовое слишком длинное! Пожалуйста, диктуй еду короче (до 1 минуты).")
+                return
+
             file_id = message.voice.file_id
             file = await bot.get_file(file_id)
             temp_filename = f"voice_nut_{message.from_user.id}.ogg"
             
-            # Сохраняем физически на диск, чтобы Groq не ловил пустые байты
+            # 2. Включаем статус "печатает..."
+            from aiogram.enums import ChatAction
+            await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+            
             await bot.download_file(file.file_path, temp_filename)
             await asyncio.sleep(0.1)
             
             user_text = await manager.transcribe_voice(temp_filename)
             
-            # Удаляем мусор за собой
+            # Удаляем временный файл
             if os.path.exists(temp_filename):
                 os.remove(temp_filename)
         else:
@@ -342,19 +373,23 @@ async def process_nutrition_input(message: Message, session: AsyncSession, state
 
         parse_prompt = (
             f"Ты — строгий калькулятор калорий. Текущее время пользователя: {current_time}.\n"
-            "Пользователь перечислил съеденные продукты. Определи тип приема пищи строго по времени:\n"
+            "Определи тип приема пищи строго по времени:\n"
             "- 06:00-10:00 — Завтрак\n"
             "- 10:00-12:00 — Перекус\n"
             "- 12:00-15:00 — Обед\n"
             "- 15:00-17:00 — Перекус\n"
             "- 17:00-20:00 — Ужин\n"
             "- 20:00-06:00 — Перекус\n\n"
-            "Если пользователь сам указал тип (например, 'съел на обед...'), приоритет отдавай его словам.\n"
-            "Вычлени каждый продукт и рассчитай для него: Вес(г), Калории, Белки(г), Жиры(г), Углеводы(г).\n"
-            "СТРОГОЕ ПРАВИЛО: Верни результат списком. Каждая строка строго в формате:\n"
+            "Если пользователь сам указал тип (например, 'на обед...'), приоритет его словам.\n"
+            "Рассчитай для каждого продукта: Вес(г), Калории, Белки(г), Жиры(г), Углеводы(г).\n\n"
+            "СТРОГИЕ ПРАВИЛА РАСЧЕТА КБЖУ:\n"
+            "1. ПРИНЦИП 'ГОТОВОГО БЛЮДА': Макароны, рис, крупы считай как ВАРЕНЫЕ (110-140 ккал/100г), если не указано 'сухой вес'.\n"
+            "2. ПРОВЕРКА: 300г готовых макарон не могут быть 1100 ккал. Это ~350-450 ккал.\n"
+            "3. СЛОЖНЫЕ БЛЮДА: Если указано блюдо (борщ, плов), считай среднюю порцию по ГОСТу.\n"
+            "4. ЧИСЛА: Используй точку как разделитель (например, 15.5), а не запятую.\n\n"
+            "ВЕРНИ СТРОГО СПИСКОМ БЕЗ ЛИШНЕГО ТЕКСТА:\n"
             "Тип | Название | Вес | Калории | Белки | Жиры | Углеводы\n"
-            "ПРИМЕР: Завтрак | Яйцо куриное вареное | 150 | 235 | 19.5 | 16.3 | 1.0\n"
-            "Используй только цифры, разделяй символом |. Никаких лишних слов.\n"
+            "ПРИМЕР: Завтрак | Овсяная каша на молоке | 250 | 260 | 8.5 | 9.2 | 35.0\n"
             f"Текст пользователя: {user_text}"
         )
         
@@ -475,7 +510,7 @@ async def show_today_nutrition(callback: CallbackQuery, session: AsyncSession):
             text += f"🕒 <b>{meal_name}</b> ({int(meal_kcal)} ккал):\n"
             for log in meal_logs:
                 # 🔥 ТЕПЕРЬ РЯДОМ С КАЖДЫМ БЛЮДОМ ЕСТЬ КОМАНДА /del_ID
-                text += f"  • {log.product_name} ({log.weight}г) — {log.calories} ккал  ❌ /del_{log.id}\n"
+                text += f"  • {log.product_name} ({log.weight}г) — {log.calories} ккал  /del_{log.id}\n"
             text += "\n"
         
     text += "═════════════════\n"
@@ -485,8 +520,29 @@ async def show_today_nutrition(callback: CallbackQuery, session: AsyncSession):
     text += f"🍞 <b>Углеводы:</b> {round(total_c)} г\n"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Добавить прием пищи", callback_data="log_nutrition_press")],
-        [InlineKeyboardButton(text="🔙 Закрыть", callback_data="cancel_nutrition")]
+        [InlineKeyboardButton(text="📝 Добавить прием пищи", callback_data="log_nutrition_press")], # Убедись, что хендлер log_nutrition_press у тебя существует!
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_my_menu")]
     ])
     
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    # Меняем answer на edit_text и подставляем правильную переменную (например, text)
+    try:
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        # Если edit_text по какой-то причине не сработает, отправляем новым сообщением
+        await callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+        
+    await callback.answer() # Гасим часики
+# ==========================================
+# ВОЗВРАТ ИЗ СВОДКИ НАЗАД В "МОЕ МЕНЮ"
+# ==========================================
+@router.callback_query(F.data == "back_to_my_menu")
+async def back_to_my_menu_callback(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    # Удаляем сообщение со сводкой, чтобы не засорять чат
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+        
+    # Просто вызываем существующую функцию показа "Моего меню"
+    await show_my_nutrition(callback.message, session, state)
+    await callback.answer()    

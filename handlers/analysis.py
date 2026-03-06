@@ -53,8 +53,13 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
     ai_prompt = ""
 
     if analysis_type == "analyze_workouts":
-        workouts_count = await UserCRUD.get_weekly_workouts_count(session, user.telegram_id)
-        stmt_ex = select(ExerciseLog).where(ExerciseLog.user_id == user.telegram_id).order_by(ExerciseLog.date)
+        # ИСПРАВЛЕНИЕ: Считаем уникальные даты (дни), а не каждую запись в таблице!
+        stmt_count = select(func.count(func.distinct(func.date(WorkoutLog.date)))).where(WorkoutLog.user_id == user.telegram_id)
+        res_count = await session.execute(stmt_count)
+        workouts_count = res_count.scalar() or 0
+        
+        # Получаем сами упражнения для анализа
+        stmt_ex = select(WorkoutLog).where(WorkoutLog.user_id == user.telegram_id).order_by(WorkoutLog.date.desc()).limit(50)
         res_ex = await session.execute(stmt_ex)
         exercises = res_ex.scalars().all()
         

@@ -89,8 +89,8 @@ async def main():
     # --- ПОРЯДОК РОУТЕРОВ (ВАЖЕН!) ---
     dp.include_routers(
         admin.router,     # Админка (всегда первая)
-        ai_workout.router,# Перенесите сюда (теперь он приоритетный)
         common.router,    # Общие команды (/cancel, Техника)
+        ai_workout.router,# Перенесите сюда (теперь он приоритетный)
         analysis.router,  # Анализ веса (чтобы перехватывать числа)
         nutrition.router, # Питание
         start.router,     # Регистрация

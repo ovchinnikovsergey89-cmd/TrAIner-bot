@@ -13,10 +13,10 @@ logger = logging.getLogger(__name__)
 
 # Настройки тарифов: {Уровень: (Генерации, Вопросы)}
 SUBSCRIPTION_LIMITS = {
-    "free": (3, 5),      # Free
-    "lite": (10, 20),    # Lite
-    "standard": (25, 50),    # Standard 
-    "ultra": (50, 100)    # Ultra
+    "free": (3, 5),      
+    "lite": (10, 20),    
+    "standard": (25, 50),     
+    "ultra": (50, 100)   
 }
 
 async def send_morning_motivation(bot: Bot, session_pool: async_sessionmaker):
@@ -81,23 +81,28 @@ async def reset_daily_limits(session_pool: async_sessionmaker):
     now = datetime.datetime.now(msk_tz).replace(tzinfo=None) # Убираем tzinfo для совместимости со SQLite
 
     async with session_pool() as session:
-        # 1. Проверяем просроченные подписки и сбрасываем их на Free ("free")
-        await session.execute(
-            update(User)
-            .where((User.subscription_level != "free") & (User.subscription_expires_at < now))
-            .values(subscription_level="free", subscription_expires_at=None)
-        )
-        await session.commit()
-
-        # 2. Обновляем лимиты для каждого уровня
-        for level, limits in SUBSCRIPTION_LIMITS.items():
-            workout_lim, chat_lim = limits
-            
+        try:
+            # 1. Проверяем просроченные подписки и сбрасываем их на "free"
             await session.execute(
                 update(User)
-                .where(User.subscription_level == level)
-                .values(workout_limit=workout_lim, chat_limit=chat_lim)
+                .where((User.subscription_level.in_(["lite", "standard", "ultra"])) & (User.sub_end_date < now))
+                .values(subscription_level="free", is_premium=False, sub_end_date=None)
             )
-        
-        await session.commit()
-    logger.info("✅ Лимиты успешно обновлены!")
+
+            # 2. Обновляем лимиты генераций и сообщений
+            for level, limits in SUBSCRIPTION_LIMITS.items():
+                workout_lim, chat_lim = limits
+                
+                await session.execute(
+                    update(User)
+                    .where(User.subscription_level == level)
+                    .values(
+                        workout_limit=workout_lim, 
+                        chat_limit=chat_lim
+                    )
+                )
+            
+            await session.commit()
+            logger.info("✅ Лимиты успешно обновлены по новым тарифам!")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при сбросе лимитов: {e}")
