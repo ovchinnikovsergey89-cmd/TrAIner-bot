@@ -94,7 +94,9 @@ async def show_my_nutrition(message: Message, session: AsyncSession, state: FSMC
         ])
         await message.answer("🤷‍♂️ Нет сохраненного меню. Нажми <b>🍏 Питание</b> или начни вести дневник прямо сейчас!", reply_markup=empty_kb, parse_mode=ParseMode.HTML)
 
-# --- ГЕНЕРАЦИЯ ---
+# ==========================================
+# 1. ВХОД В РАЗДЕЛ (ГЛАВНАЯ КНОПКА)
+# ==========================================
 @router.message(F.text == "🍏 Питание")
 @router.message(Command("ai_nutrition"))
 async def request_ai_nutrition(message: Message, session: AsyncSession, state: FSMContext):
@@ -105,27 +107,58 @@ async def request_ai_nutrition(message: Message, session: AsyncSession, state: F
 
     if user.current_nutrition_program:
         confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Новое меню", callback_data="confirm_new_nutrition")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")] # <--- ИСПРАВИЛИ ЗДЕСЬ
+            [InlineKeyboardButton(text="✅ Создать НОВОЕ меню", callback_data="confirm_new_nutrition")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
         ])
-        await message.answer("Тренер уже составлял меню. Сделать новое?", reply_markup=confirm_kb)
+        await message.answer("🍎 <b>У тебя уже есть план питания.</b>\n\n"
+            "Хочешь составить абсолютно новый рацион?", reply_markup=confirm_kb)
     else:
+        # Если меню вообще нет — сразу к пожеланиям
+        await state.update_data(current_nutrition_program=None)
         await ask_nutrition_wishes(message, state)
 
 # ==========================================
-# ОБРАБОТЧИК КНОПКИ "НОВОЕ МЕНЮ"
+# 2. ОБРАБОТЧИК: СОЗДАНИЕ С НУЛЯ
+# Срабатывает при нажатии "✅ Составить НОВОЕ меню"
 # ==========================================
 @router.callback_query(F.data == "confirm_new_nutrition")
-async def process_confirm_new_nutrition(callback: CallbackQuery, state: FSMContext):
-    # Пытаемся удалить сообщение с вопросом, чтобы не мусорить в чате
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+async def confirm_new_nutrition_handler(callback: CallbackQuery, state: FSMContext):
+    # Очищаем старый план в state, чтобы ИИ выдал НОВОЕ, а не правил старое
+    await state.update_data(current_nutrition_program=None)
+    await state.set_state(WorkoutRequest.waiting_for_nutrition_wishes)
     
-    # Запускаем функцию ввода пожеланий (как если бы меню не было)
     await ask_nutrition_wishes(callback.message, state)
-    await callback.answer() # Гасим часики на кнопке
+    await callback.answer()
+    try: await callback.message.delete()
+    except: pass
+
+# ==========================================
+# 3. ОБРАБОТЧИК: РЕДАКТИРОВАНИЕ ТЕКУЩЕГО
+# Срабатывает при нажатии "✏️ Изменить текущее" или "Новый рацион" внутри меню
+# ==========================================
+@router.callback_query(F.data == "regen_nutrition")
+@router.callback_query(F.data == "refresh_ai_nutrition")
+async def edit_existing_nutrition_handler(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    user = await UserCRUD.get_user(session, callback.from_user.id)
+    
+    # 1. Сохраняем текущий план в state (для ИИ-редактора)
+    await state.update_data(current_nutrition_program=user.current_nutrition_program)
+    
+    # 2. Устанавливаем состояние ожидания правок
+    await state.set_state(WorkoutRequest.waiting_for_nutrition_wishes) 
+    
+    # 3. Присылаем вопрос НОВЫМ сообщением (не удаляя старое с меню!)
+    await callback.message.answer(
+        "📝 <b>Что именно изменить в этом меню?</b>\n\n"
+        "План выше перед тобой. Напиши, что заменить или добавить (например: <i>'убери рыбу'</i> или <i>'Замени варианты перекуса'</i> ), "
+        "или просто нажми /cancel для отмены.",
+        parse_mode="HTML"
+    )
+    
+    # 4. Гасим часики на кнопке
+    await callback.answer()
+    
+    # СТРОКУ С DELETE МЫ УБРАЛИ, ЧТОБЫ МЕНЮ НЕ ИСЧЕЗАЛО!
 
 @router.callback_query(F.data == "log_nutrition_press")
 async def start_log_nutrition(callback: CallbackQuery, state: FSMContext):
@@ -158,8 +191,9 @@ async def ask_nutrition_wishes(message: Message, state: FSMContext):
     await state.set_state(WorkoutRequest.waiting_for_nutrition_wishes)
 
 async def generate_nutrition_process(message: Message, session: AsyncSession, user, state: FSMContext, wishes: str, status_msg: Message = None):
-    user_data = await state.get_data()
-    last_gen_time = user_data.get("last_nutrition_gen_time", 0)
+    # Используем другое имя переменной (user_state_data), чтобы не перезаписать наш словарь для ИИ
+    user_state_data = await state.get_data()
+    last_gen_time = user_state_data.get("last_nutrition_gen_time", 0)
     current_time = time.time()
 
     if current_time - last_gen_time < 300 and not is_admin(message.from_user.id):
@@ -168,7 +202,9 @@ async def generate_nutrition_process(message: Message, session: AsyncSession, us
         return
 
     if user.workout_limit <= 0:
-        if status_msg: await status_msg.delete()
+        if status_msg: 
+            try: await status_msg.delete()
+            except: pass
         await message.answer(
             "🚀 <b>Упс! Попытки закончились</b>\n\n"
             "Вы использовали все бесплатные генерации.",
@@ -182,52 +218,91 @@ async def generate_nutrition_process(message: Message, session: AsyncSession, us
     await state.update_data(last_nutrition_gen_time=current_time)
 
     try:
+        # --- НОВОЕ: ОПРЕДЕЛЯЕМ ГЛУБИНУ ИСТОРИИ ПО ТАРИФУ ---
+        history_limit = 0
+        sub_level = user.subscription_level.lower() if user.subscription_level else "free"
+        
+        if sub_level == "ultra":
+            history_limit = 5
+        elif sub_level in ["standart", "standard"]:
+            history_limit = 3
+        elif sub_level == "lite":
+            history_limit = 1
+            
+        # --- НОВОЕ: ДОСТАЕМ ИСТОРИЮ ИЗ АРХИВА ---
+        past_programs = []
+        if history_limit > 0:
+            past_programs = await UserCRUD.get_program_history(session, user.telegram_id, 'nutrition', history_limit)
+        
+        # Склеиваем историю меню
+        history_text = "\n\n=== ПРОШЛОЕ МЕНЮ ===\n\n".join(past_programs) if past_programs else ""
+
         user_data = {
             "goal": user.goal, "gender": user.gender, "weight": user.weight, 
             "age": user.age, "activity_level": user.activity_level, "height": user.height,
-            "name": user.name, "wishes": wishes 
+            "name": user.name, "wishes": wishes, "current_nutrition_program": user.current_nutrition_program,
+            "past_programs": history_text # <-- Передаем историю ИИ
         }
         
         ai_service = AIManager()
         raw_pages = await ai_service.generate_nutrition_pages(user_data)
         
         if not raw_pages or "❌" in raw_pages[0]:
-            if status_msg: await status_msg.delete()
+            if status_msg: 
+                try: await status_msg.delete()
+                except: pass
             await message.answer("❌ Сервер перегружен, попробуй позже.")
             return
 
         import json
-        user.current_nutrition_program = json.dumps(raw_pages, ensure_ascii=False)
+        pages_json = json.dumps(raw_pages, ensure_ascii=False)
+        user.current_nutrition_program = pages_json
         user.workout_limit -= 1
+        
+        # --- НОВОЕ: СОХРАНЯЕМ В АРХИВ ---
+        await UserCRUD.save_program_history(session, user.telegram_id, 'nutrition', pages_json)
+
         await session.commit()
 
         if status_msg:
             try: await status_msg.delete()
             except: pass
 
+        # Сохраняем страницы в стейт, чтобы пагинация работала без ошибок!
+        await state.update_data(nutrition_pages=raw_pages, current_page=0)
+
         await message.answer(
             raw_pages[0],
             parse_mode=ParseMode.HTML,
             reply_markup=get_nutrition_kb_with_diary(0, len(raw_pages)) # <-- ИСПОЛЬЗУЕМ ХЕЛПЕР
         )
-            
-        await state.clear()
 
     except Exception as e:
-        if status_msg: await status_msg.delete()
+        if status_msg: 
+            try: await status_msg.delete()
+            except: pass
         print(f"Ошибка: {e}")
         
         ai = AIManager()
         raw_pages = await ai.generate_nutrition_pages(user_data)
+        
+        # Если clean_text не импортирован, тут может быть ошибка, но я оставляю твой код:
+        from utils.text_tools import clean_text # На всякий случай добавил импорт, чтобы не упало
         cleaned_pages = [clean_text(p) for p in raw_pages if len(p) > 20]
         
         if not cleaned_pages:
-            await status_msg.edit_text("⚠️ Тренер задумался и ничего не ответил. Попробуй еще раз.")
+            if status_msg: await status_msg.edit_text("⚠️ Тренер задумался и ничего не ответил. Попробуй еще раз.")
+            else: await message.answer("⚠️ Тренер задумался и ничего не ответил. Попробуй еще раз.")
             return
 
+        import json
         pages_json = json.dumps(cleaned_pages, ensure_ascii=False)
         await UserCRUD.update_user(session, user.telegram_id, current_nutrition_program=pages_json)
         
+        # Сохраняем историю даже если отработало через блок except!
+        await UserCRUD.save_program_history(session, user.telegram_id, 'nutrition', pages_json)
+        
+        # Тут у тебя вызывалась show_pages (видимо, импортирована где-то выше)
         await show_pages(message, state, cleaned_pages, from_db=False)
 
 # --- ЛИСТАЛКА ---
@@ -261,10 +336,14 @@ async def change_nutrition_page(callback: CallbackQuery, session: AsyncSession):
 
 @router.message(WorkoutRequest.waiting_for_nutrition_wishes)
 async def process_nutrition_wishes(message: Message, state: FSMContext, session: AsyncSession):
+    # 1. СРАЗУ сбрасываем состояние, чтобы бот не генерировал меню по кругу
+    await state.set_state(None) 
+    
     user_wishes = message.text
     data = await state.get_data()
     old_wishes = data.get("wishes", "")
     
+    # Логика склеивания пожеланий
     if old_wishes and user_wishes.lower() != "без изменений":
         combined_wishes = f"{old_wishes}. Дополнительно: {user_wishes}"
     else:
@@ -274,6 +353,8 @@ async def process_nutrition_wishes(message: Message, state: FSMContext, session:
     user = await UserCRUD.get_user(session, message.from_user.id)
     
     status_msg = await message.answer("👨‍🍳 <b>Тренер составляет меню...</b>", parse_mode="HTML")
+    
+    # Запускаем генерацию
     await generate_nutrition_process(message, session, user, state, wishes=combined_wishes, status_msg=status_msg)
 
 # --- ПОИСК РЕЦЕПТОВ ---

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, desc
 from database.models import User
 from database.database import async_session as AsyncSessionLocal # Убедись, что импорт правильный
 
@@ -176,3 +176,65 @@ class UserCRUD:
             
         await session.commit()
         return True
+    
+    # ==========================================
+    # ИСТОРИЯ ГЕНЕРАЦИЙ (ДЛЯ ПАМЯТИ ИИ)
+    # ==========================================
+    @staticmethod
+    async def save_program_history(session: AsyncSession, telegram_id: int, program_type: str, program_text: str):
+        """Сохраняет сгенерированную программу в историю"""
+        from database.models import WorkoutProgramHistory, NutritionProgramHistory
+        
+        try:
+            if program_type == 'workout':
+                history_entry = WorkoutProgramHistory(user_id=telegram_id, program_text=program_text)
+            elif program_type == 'nutrition':
+                history_entry = NutritionProgramHistory(user_id=telegram_id, program_text=program_text)
+            else:
+                return False
+                
+            session.add(history_entry)
+            await session.commit()
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка при сохранении истории {program_type}: {e}")
+            await session.rollback()
+            return False
+
+    @staticmethod
+    async def get_program_history(session: AsyncSession, telegram_id: int, program_type: str, limit: int = 3):
+        """Достает последние N программ из истории (только последнюю за каждый уникальный день)"""
+        from database.models import WorkoutProgramHistory, NutritionProgramHistory
+        
+        try:
+            if program_type == 'workout':
+                model = WorkoutProgramHistory
+            elif program_type == 'nutrition':
+                model = NutritionProgramHistory
+            else:
+                return []
+                
+            # 1. ПОДЗАПРОС: находим максимальный ID (последнюю генерацию) для каждого уникального дня
+            subq = (
+                select(func.max(model.id))
+                .where(model.user_id == telegram_id)
+                .group_by(func.date(model.created_at))
+            )
+            
+            # 2. ОСНОВНОЙ ЗАПРОС: берем только эти финальные записи дня
+            result = await session.execute(
+                select(model)
+                .where(model.id.in_(subq))
+                .order_by(desc(model.created_at))
+                .limit(limit)
+            )
+            
+            records = result.scalars().all()
+            
+            # Возвращаем список текстов. Переворачиваем (reversed), 
+            # чтобы ИИ читал хронологически: от самой старой к самой свежей
+            return [record.program_text for record in reversed(records)]
+            
+        except Exception as e:
+            print(f"❌ Ошибка при получении истории {program_type}: {e}")
+            return [] 

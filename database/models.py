@@ -94,3 +94,19 @@ class NutritionLog(Base):
     carbs = Column(Float, default=0.0)
     
     date = Column(DateTime, default=func.now())
+
+class WorkoutProgramHistory(Base):
+    __tablename__ = 'workout_program_history'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"))
+    program_text = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+
+class NutritionProgramHistory(Base):
+    __tablename__ = 'nutrition_program_history'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"))
+    program_text = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.now)    

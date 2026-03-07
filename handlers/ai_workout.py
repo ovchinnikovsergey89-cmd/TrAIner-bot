@@ -256,8 +256,8 @@ async def force_regen_workout(callback: CallbackQuery, state: FSMContext):
 # ==========================================
 async def generate_workout_process(message: Message, session: AsyncSession, user, state: FSMContext, wishes: str = None):
     # --- 1. ЗАЩИТА ОТ СПАМА (Раз в 5 минут) ---
-    user_data = await state.get_data()
-    last_gen_time = user_data.get("last_workout_gen_time", 0)
+    state_data = await state.get_data()
+    last_gen_time = state_data.get("last_workout_gen_time", 0)
     current_time = time.time()
     
     if current_time - last_gen_time < 300 and not is_admin(message.from_user.id):
@@ -276,13 +276,34 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
         return
     
     await state.update_data(last_workout_gen_time=current_time)
-    loading_msg = await message.answer("🗓 <b>Тренер изучает пожелания и составляет программу...</b>", parse_mode=ParseMode.HTML)
+    loading_msg = await message.answer("🗓 <b>Тренер изучает историю и составляет программу...</b>", parse_mode=ParseMode.HTML)
     
     try:
+        # --- НОВОЕ: ОПРЕДЕЛЯЕМ ГЛУБИНУ ИСТОРИИ ПО ТАРИФУ ---
+        history_limit = 0
+        sub_level = user.subscription_level.lower() if user.subscription_level else "free"
+        
+        if sub_level == "ultra":
+            history_limit = 5
+        elif sub_level in ["standart", "standard"]:
+            history_limit = 3
+        elif sub_level == "lite":
+            history_limit = 1
+            
+        # --- НОВОЕ: ДОСТАЕМ ИСТОРИЮ ИЗ АРХИВА ---
+        past_programs = []
+        if history_limit > 0:
+            past_programs = await UserCRUD.get_program_history(session, user.telegram_id, 'workout', history_limit)
+        
+        # Склеиваем прошлые программы в один текст, чтобы ИИ мог их прочитать
+        history_text = "\n\n=== ПРОШЛАЯ ПРОГРАММА ===\n\n".join(past_programs) if past_programs else ""
+
         user_data = {
             "workout_days": user.workout_days, "goal": user.goal, "gender": user.gender,
             "weight": user.weight, "age": user.age, "workout_level": user.workout_level,
-            "name": user.name, "height": user.height, "wishes": wishes
+            "name": user.name, "height": user.height, "wishes": wishes, 
+            "current_workout_program": user.current_workout_program,
+            "past_programs": history_text # <-- Передаем историю ИИ
         }
         
         # ГЕНЕРАЦИЯ
@@ -295,10 +316,14 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
 
         cleaned_pages = [clean_text(p) for p in raw_pages]
 
-        # --- 3. СОХРАНЕНИЕ В БД ---
+        # --- 3. СОХРАНЕНИЕ В БД И АРХИВ ---
         pages_json = json.dumps(cleaned_pages, ensure_ascii=False)
         user.current_workout_program = pages_json
         user.workout_limit -= 1
+        
+        # --- НОВОЕ: СОХРАНЯЕМ В АРХИВ ---
+        await UserCRUD.save_program_history(session, user.telegram_id, 'workout', pages_json)
+
         await session.commit()
         await UserCRUD.update_user(session, user.telegram_id, current_workout_program=pages_json)
 
