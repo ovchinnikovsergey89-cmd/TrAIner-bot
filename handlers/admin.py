@@ -1,3 +1,4 @@
+import datetime
 import logging
 import asyncio
 from aiogram import Router, F
@@ -5,6 +6,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, FSInputFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from database.models import PromoCode
 from database.crud import UserCRUD
 from config import Config
 
@@ -116,3 +118,57 @@ async def admin_boost_cmd(message: Message, session: AsyncSession, state: FSMCon
     )
     
     await message.answer("🚀 <b>Босс, лимиты пополнены (999), таймеры сброшены!</b>", parse_mode="HTML")        
+
+# 1. ГЕНЕРАЦИЯ (с поддержкой срока годности)
+@router.message(Command("gen_promo"))
+async def admin_gen_promo(message: Message, session: AsyncSession):
+    args = message.text.split()
+    if len(args) < 4:
+        await message.answer("ℹ️ <code>/gen_promo КОД КОЛВО УРОВЕНЬ [ДНИ]</code>\nПример: <code>/gen_promo VIP 10 ultra 1</code>", parse_mode="HTML")
+        return
+
+    code_text = args[1].upper()
+    uses = int(args[2])
+    level = args[3].lower()
+    days = int(args[4]) if len(args) > 4 else 365 # По умолчанию год
+
+    expiry = datetime.datetime.now() + datetime.timedelta(days=days)
+    
+    new_promo = PromoCode(code=code_text, uses_left=uses, target_level=level, expiry_date=expiry)
+    session.add(new_promo)
+    
+    try:
+        await session.commit()
+        await message.answer(f"✅ Код <b>{code_text}</b> создан!\nЛимит: {uses} чел.\nГоден до: {expiry.strftime('%d.%m.%Y %H:%M')}")
+    except Exception:
+        await session.rollback()
+        await message.answer("❌ Такой код уже есть!")
+
+# 2. УДАЛЕНИЕ
+@router.message(Command("del_promo"))
+async def admin_del_promo(message: Message, session: AsyncSession):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Введите код: <code>/del_promo КОД</code>")
+        return
+    
+    success = await UserCRUD.delete_promo(session, args[1])
+    if success:
+        await message.answer(f"🗑 Промокод <b>{args[1].upper()}</b> удален.")
+    else:
+        await message.answer("❌ Код не найден.")
+
+# 3. СПИСОК ВСЕХ КОДОВ
+@router.message(Command("list_promos"))
+async def admin_list_promos(message: Message, session: AsyncSession):
+    promos = await UserCRUD.get_all_promos(session)
+    if not promos:
+        await message.answer("Список промокодов пуст.")
+        return
+    
+    text = "📋 <b>Список промокодов:</b>\n\n"
+    for p in promos:
+        status = "✅" if p.uses_left > 0 else "❌"
+        text += f"{status} <code>{p.code}</code> | {p.target_level} | Осталось: {p.uses_left}\n"
+    
+    await message.answer(text, parse_mode="HTML")    

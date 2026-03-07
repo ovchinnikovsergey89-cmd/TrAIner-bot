@@ -109,4 +109,13 @@ class NutritionProgramHistory(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"))
     program_text = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.datetime.now)    
+    created_at = Column(DateTime, default=datetime.datetime.now)   
+
+class PromoCode(Base):
+    __tablename__ = 'promocodes'
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String, unique=True, nullable=False) # Сам код (например, 'BLOGER100')
+    target_level = Column(String, default='ultra') # Какой уровень дает (lite, standard, ultra)
+    uses_left = Column(Integer, default=1) # Сколько раз можно активировать
+    expiry_date = Column(DateTime, nullable=True) # До какого числа работает     

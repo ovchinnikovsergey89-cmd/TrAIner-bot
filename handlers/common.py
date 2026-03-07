@@ -5,7 +5,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy.ext.asyncio import AsyncSession
 
+
+from database.crud import UserCRUD
 from keyboards.main_menu import get_main_menu
 from services.rutube_service import search_exercise_video
 from keyboards.subscription import get_subscription_keyboard
@@ -123,4 +126,16 @@ async def cmd_subscribe(message: types.Message):
         "— Глубокий анализ рациона\n"
         "— Все функции Стандарт"
     )
-    await message.answer(text, reply_markup=get_subscription_keyboard(), parse_mode="Markdown")        
+    await message.answer(text, reply_markup=get_subscription_keyboard(), parse_mode="Markdown")  
+
+@router.message(Command("promo"))
+async def promo_command(message: Message, session: AsyncSession):
+    # Разбиваем сообщение, чтобы достать сам код: /promo СЕКРЕТ
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Введите команду вместе с кодом, например: <code>/promo СЕКРЕТ</code>", parse_mode="HTML")
+        return
+
+    promo_text = args[1]
+    result_text = await UserCRUD.activate_promo(session, message.from_user.id, promo_text)
+    await message.answer(result_text)          

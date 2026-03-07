@@ -238,3 +238,51 @@ class UserCRUD:
         except Exception as e:
             print(f"❌ Ошибка при получении истории {program_type}: {e}")
             return [] 
+        
+    @staticmethod
+    async def activate_promo(session: AsyncSession, telegram_id: int, promo_text: str):
+        from database.models import PromoCode, User
+        
+        # Ищем код в базе
+        result = await session.execute(
+            select(PromoCode).where(PromoCode.code == promo_text.upper())
+        )
+        promo = result.scalar_one_or_none()
+        
+        if not promo or promo.uses_left <= 0:
+            return "❌ Код неверный или закончился."
+
+        # Получаем юзера
+        user = await UserCRUD.get_user(session, telegram_id)
+        
+        # Обновляем данные юзера
+        user.subscription_level = promo.target_level
+        # Если ultra, даем много лимитов
+        if promo.target_level == 'ultra':
+            user.workout_limit = 100 
+            user.nutrition_limit = 100
+
+        # Уменьшаем количество использований промокода
+        promo.uses_left -= 1
+        
+        await session.commit()
+        return f"✅ Активирован режим {promo.target_level.upper()}! Лимиты обновлены."    
+    
+    @staticmethod
+    async def delete_promo(session: AsyncSession, promo_text: str):
+        from database.models import PromoCode
+        result = await session.execute(
+            select(PromoCode).where(PromoCode.code == promo_text.upper())
+        )
+        promo = result.scalar_one_or_none()
+        if promo:
+            await session.delete(promo)
+            await session.commit()
+            return True
+        return False
+
+    @staticmethod
+    async def get_all_promos(session: AsyncSession):
+        from database.models import PromoCode
+        result = await session.execute(select(PromoCode))
+        return result.scalars().all()
