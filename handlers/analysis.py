@@ -6,7 +6,7 @@ from aiogram.enums import ParseMode, ChatAction
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, distinct
 
 from handlers.admin import is_admin
 from database.crud import UserCRUD
@@ -53,13 +53,17 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
     ai_prompt = ""
 
     if analysis_type == "analyze_workouts":
-        # ИСПРАВЛЕНИЕ: Считаем уникальные даты (дни), а не каждую запись в таблице!
-        stmt_count = select(func.count(func.distinct(func.date(WorkoutLog.date)))).where(WorkoutLog.user_id == user.telegram_id)
-        res_count = await session.execute(stmt_count)
-        workouts_count = res_count.scalar() or 0
+        workouts_count = await UserCRUD.get_weekly_workouts_count(session, user.telegram_id)
         
-        # Получаем сами упражнения для анализа
-        stmt_ex = select(WorkoutLog).where(WorkoutLog.user_id == user.telegram_id).order_by(WorkoutLog.date.desc()).limit(50)
+        # ДОБАВЛЕНО УСЛОВИЕ .is_not(None)
+        stmt_ex = (
+            select(ExerciseLog)
+            .where(
+                ExerciseLog.user_id == user.telegram_id,
+                ExerciseLog.exercise_name.is_not(None) 
+            )
+            .order_by(ExerciseLog.date)
+        )
         res_ex = await session.execute(stmt_ex)
         exercises = res_ex.scalars().all()
         
@@ -82,7 +86,6 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
                      f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу.")
 
     elif analysis_type == "analyze_nutrition":
-        # 🔥 НОВЫЙ СБОР ПИТАНИЯ С УЧЕТОМ ТИПОВ
         seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
         stmt_nut = select(
             func.date(NutritionLog.date).label("day"),
@@ -96,6 +99,13 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
         
         res_nut = await session.execute(stmt_nut)
         nut_days_raw = res_nut.all()
+        
+        # --- ДОБАВЛЕНО: ГЕНЕРАЦИЯ ГРАФИКА ПИТАНИЯ ---
+        if nut_days_raw:
+            graph_buf = await GraphService.create_nutrition_graph(nut_days_raw)
+            if graph_buf: 
+                graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="nutrition.png")
+        # --------------------------------------------
         
         nut_text = "Нет данных."
         if nut_days_raw:
@@ -199,30 +209,64 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
             workouts_count = await UserCRUD.get_weekly_workouts_count(session, user.telegram_id)
             seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
             
-            nut_days = (await session.execute(select(func.date(NutritionLog.date).label("day"), func.sum(NutritionLog.calories).label("kcal")).where(NutritionLog.user_id == user.telegram_id, NutritionLog.date >= seven_days_ago).group_by(func.date(NutritionLog.date)).order_by("day"))).all()
-            exercises = (await session.execute(select(ExerciseLog).where(ExerciseLog.user_id == user.telegram_id).order_by(ExerciseLog.date))).scalars().all()
+            # 1. Сбор данных по питанию
+            nut_stmt = (
+                select(
+                    func.date(NutritionLog.date).label("day"), 
+                    func.sum(NutritionLog.calories).label("kcal")
+                )
+                .where(
+                    NutritionLog.user_id == user.telegram_id, 
+                    NutritionLog.date >= seven_days_ago
+                )
+                .group_by(func.date(NutritionLog.date))
+                .order_by("day")
+            )
+            nut_res = await session.execute(nut_stmt)
+            nut_days = nut_res.all()
             
+            # 2. Сбор данных по тренировкам
+            ex_stmt = (
+                select(WorkoutLog)
+                .where(
+                    WorkoutLog.user_id == user.telegram_id,
+                    WorkoutLog.exercise_name.is_not(None)  # Теперь внутри where() через запятую
+                )
+                .order_by(WorkoutLog.date.desc())
+                .limit(5)
+            )
+            ex_res = await session.execute(ex_stmt)
+            exercises = ex_res.scalars().all()
+            
+            # 3. Формирование текста для промпта
             nut_text = "\n".join([f"{d.day}: {int(d.kcal)} ккал" for d in nut_days]) if nut_days else "Нет данных"
-            ex_text = "; ".join([f"{ex.exercise_name}: {ex.weight}кг" for ex in exercises[-5:]]) if exercises else "Нет данных"
+            ex_text = "; ".join([f"{ex.exercise_name}: {ex.weight}кг" for ex in reversed(exercises)]) if exercises else "Нет данных"
 
             extended_goal = (f"Ты строгий фитнес-тренер. Сделай комплексный анализ: сравни питание, тренировки и вес клиента. "
                              f"Цель: {user.goal}. Тренировок за неделю: {workouts_count}. Рабочие веса: {ex_text}. Питание(7дн): {nut_text}. "
                              f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу.")
         else:
             graph_buf = await GraphService.create_weight_graph(history_data)
-            if graph_buf: graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="weight.png")
+            if graph_buf: 
+                graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="weight.png")
+            
             extended_goal = (f"Ты фитнес-тренер. Проанализируй динамику веса клиента. Цель: {user.goal}. "
                              f"Дай короткий совет. ВАЖНО: Не используй слово 'Вердикт' в своем ответе.")
 
+        # Вызов ИИ происходит для любого из условий выше
         ai = AIManager()
         ai_feedback = await ai.analyze_progress({
             "name": user.name, "weight": new_weight, "goal": extended_goal, "workout_days": user.workout_days
         }, new_weight, 0)
 
-        if not is_admin(user.telegram_id): user.workout_limit -= 1
+        if not is_admin(user.telegram_id): 
+            user.workout_limit -= 1
 
-    try: await temp_msg.delete()
-    except: pass
+    # Выход из блока async with session.begin():
+    try: 
+        await temp_msg.delete()
+    except: 
+        pass
 
     title = "🏆 Комплексный разбор" if analysis_type == "analyze_full" else "📈 Динамика веса"
     caption_text = f"<b>{title}</b>\n\n💬 <b>Вердикт тренера:</b>\n{ai_feedback}"

@@ -42,6 +42,8 @@ class GraphService:
         # Группируем веса по упражнениям
         ex_dict = defaultdict(list)
         for ex in exercises:
+            if not ex.exercise_name:  # ДОБАВЛЕНО
+                continue
             name = ex.exercise_name.capitalize()
             ex_dict[name].append((ex.date, ex.weight))
             
