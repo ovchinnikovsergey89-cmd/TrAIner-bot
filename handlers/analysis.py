@@ -55,17 +55,20 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
     if analysis_type == "analyze_workouts":
         workouts_count = await UserCRUD.get_weekly_workouts_count(session, user.telegram_id)
         
-        # ДОБАВЛЕНО УСЛОВИЕ .is_not(None)
+        # ХИРУРГИЯ: Меняем ExerciseLog на WorkoutLog! Теперь бот будет смотреть в правильную таблицу
         stmt_ex = (
-            select(ExerciseLog)
+            select(WorkoutLog)
             .where(
-                ExerciseLog.user_id == user.telegram_id,
-                ExerciseLog.exercise_name.is_not(None) 
+                WorkoutLog.user_id == user.telegram_id,
+                WorkoutLog.exercise_name.is_not(None),
+                WorkoutLog.weight > 0
             )
-            .order_by(ExerciseLog.date)
+            .order_by(desc(WorkoutLog.date))
+            .limit(100)
         )
         res_ex = await session.execute(stmt_ex)
         exercises = res_ex.scalars().all()
+        exercises.reverse()
         
         if exercises:
             graph_buf = await GraphService.create_workouts_graph(exercises)
@@ -74,16 +77,22 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
             ex_dict = {}
             for ex in reversed(exercises):
                 name = ex.exercise_name.lower().strip()
+                # Используем getattr на случай, если в WorkoutLog нет колонки reps
+                reps = getattr(ex, 'reps', '')
+                reps_str = f" х {reps}" if reps else ""
+                
                 if name not in ex_dict:
-                    ex_dict[name] = f"{ex.weight}кг х {ex.reps}"
-            ex_text = "; ".join([f"{k.capitalize()}: {v}" for k, v in ex_dict.items()])
+                    ex_dict[name] = f"{ex.weight}кг{reps_str}"
+            
+            ex_text = "; ".join([f"{k.capitalize()}: {v}" for k, v in list(ex_dict.items())[:15]])
         else:
             ex_text = "Нет данных."
 
         ai_prompt = (f"Ты фитнес-тренер. Оцени тренировки клиента (Цель: {user.goal}). "
                      f"Выполнено тренировок за неделю: {workouts_count}. "
                      f"Последние веса: {ex_text}. Дай профессиональный совет. "
-                     f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу.")
+                     f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу. "
+                     f"Пиши строго только про тренировки. Без приветствий (максимум 600 символов).")
 
     elif analysis_type == "analyze_nutrition":
         seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
@@ -100,16 +109,13 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
         res_nut = await session.execute(stmt_nut)
         nut_days_raw = res_nut.all()
         
-        # --- ДОБАВЛЕНО: ГЕНЕРАЦИЯ ГРАФИКА ПИТАНИЯ ---
         if nut_days_raw:
             graph_buf = await GraphService.create_nutrition_graph(nut_days_raw)
             if graph_buf: 
                 graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="nutrition.png")
-        # --------------------------------------------
         
         nut_text = "Нет данных."
         if nut_days_raw:
-            # Группируем по дням для красивого вывода
             days_dict = {}
             for d in nut_days_raw:
                 if d.day not in days_dict: days_dict[d.day] = []
@@ -119,9 +125,11 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
         else:
             nut_text = "Нет данных."
 
+        # Промпт не изменен, только добавлены точечные запреты в конец
         ai_prompt = (f"Ты нутрициолог. Оцени рацион клиента за 7 дней (Цель: {user.goal}, Вес: {user.weight}кг). "
                      f"Сводка КБЖУ: {nut_text}. Дай профессиональный совет. "
-                     f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу.")
+                     f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу. "
+                     f"Пиши строго только про питание. Без приветствий (максимум 600 символов).")
 
     try:
         analysis = await manager.get_chat_response([{"role": "user", "content": ai_prompt}], {})
@@ -173,7 +181,6 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
     async with session.begin():
         user = await UserCRUD.get_user(session, message.from_user.id)
         
-        # 🔥 СЧИТАЕМ РАЗНИЦУ ВЕСА И ОТПРАВЛЯЕМ ОТДЕЛЬНЫМ СООБЩЕНИЕМ
         old_weight = user.weight
         trend_msg = "⚖️ Сохранил твой новый вес."
         
@@ -186,15 +193,11 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
             else:
                 trend_msg = "⚖️ Вес не изменился. Записал!"
 
-        # 1. Отправляем сообщение о весе
         await message.answer(trend_msg)
-        
-        # 2. Выводим статус "Тренер анализирует"
         temp_msg = await message.answer("⏳ <i>Тренер анализирует данные...</i>", parse_mode="HTML")
 
         user.weight = new_weight
         
-        # Обновляем историю
         history_stmt = select(WeightHistory).where(WeightHistory.user_id == user.telegram_id).order_by(WeightHistory.date)
         history_res = await session.execute(history_stmt)
         history_data = history_res.scalars().all()
@@ -209,7 +212,6 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
             workouts_count = await UserCRUD.get_weekly_workouts_count(session, user.telegram_id)
             seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
             
-            # 1. Сбор данных по питанию
             nut_stmt = (
                 select(
                     func.date(NutritionLog.date).label("day"), 
@@ -225,12 +227,11 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
             nut_res = await session.execute(nut_stmt)
             nut_days = nut_res.all()
             
-            # 2. Сбор данных по тренировкам
             ex_stmt = (
                 select(WorkoutLog)
                 .where(
                     WorkoutLog.user_id == user.telegram_id,
-                    WorkoutLog.exercise_name.is_not(None)  # Теперь внутри where() через запятую
+                    WorkoutLog.exercise_name.is_not(None) 
                 )
                 .order_by(WorkoutLog.date.desc())
                 .limit(5)
@@ -238,22 +239,24 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
             ex_res = await session.execute(ex_stmt)
             exercises = ex_res.scalars().all()
             
-            # 3. Формирование текста для промпта
             nut_text = "\n".join([f"{d.day}: {int(d.kcal)} ккал" for d in nut_days]) if nut_days else "Нет данных"
             ex_text = "; ".join([f"{ex.exercise_name}: {ex.weight}кг" for ex in reversed(exercises)]) if exercises else "Нет данных"
 
+            # Промпт не изменен, добавлены точечные запреты в конец
             extended_goal = (f"Ты строгий фитнес-тренер. Сделай комплексный анализ: сравни питание, тренировки и вес клиента. "
                              f"Цель: {user.goal}. Тренировок за неделю: {workouts_count}. Рабочие веса: {ex_text}. Питание(7дн): {nut_text}. "
-                             f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу.")
+                             f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу. "
+                             f"Строго без приветствий (максимум 800 символов).")
         else:
             graph_buf = await GraphService.create_weight_graph(history_data)
             if graph_buf: 
                 graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="weight.png")
             
+            # Промпт не изменен, добавлены точечные запреты в конец
             extended_goal = (f"Ты фитнес-тренер. Проанализируй динамику веса клиента. Цель: {user.goal}. "
-                             f"Дай короткий совет. ВАЖНО: Не используй слово 'Вердикт' в своем ответе.")
+                             f"Дай короткий совет. ВАЖНО: Не используй слово 'Вердикт' в своем ответе. "
+                             f"Пиши строго только про вес. Без приветствий (максимум 500 символов).")
 
-        # Вызов ИИ происходит для любого из условий выше
         ai = AIManager()
         ai_feedback = await ai.analyze_progress({
             "name": user.name, "weight": new_weight, "goal": extended_goal, "workout_days": user.workout_days
@@ -262,7 +265,6 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
         if not is_admin(user.telegram_id): 
             user.workout_limit -= 1
 
-    # Выход из блока async with session.begin():
     try: 
         await temp_msg.delete()
     except: 

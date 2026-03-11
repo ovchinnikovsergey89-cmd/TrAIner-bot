@@ -1,12 +1,12 @@
 import html
 import re
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, cast, Date, distinct
 
 from database.crud import UserCRUD
 from database.models import WorkoutLog, ExerciseLog
@@ -35,6 +35,12 @@ ACTIVITY_MAP = {
     "sedentary": "🪑 Сидячий", "light": "🚶 Малая", 
     "moderate": "🏃 Средняя", "high": "🏋️ Высокая", "extreme": "🔥 Экстремальная"
 }
+SUB_MAP = {
+    "free": "🆓 Бесплатный",
+    "lite": "🥉 Лайт",
+    "standard": "🥈 Стандарт",
+    "ultra": "🥇 Ультра"
+}
 
 # --- 1. ГЕНЕРАЦИЯ КРАСИВОГО ТЕКСТА С РАНГОМ ---
 async def get_full_profile_text(user, session: AsyncSession) -> str:
@@ -42,6 +48,7 @@ async def get_full_profile_text(user, session: AsyncSession) -> str:
     stmt = select(func.count(WorkoutLog.id)).where(WorkoutLog.user_id == user.telegram_id)
     result = await session.execute(stmt)
     total_workouts = result.scalar() or 0
+    total_workouts = user.completed_workouts or 0
 
     # Вычисляем ранг
     if total_workouts < 3: rank = "🌱 Новичок"
@@ -50,20 +57,14 @@ async def get_full_profile_text(user, session: AsyncSession) -> str:
     elif total_workouts < 50: rank = "🥇 Машина"
     else: rank = "👑 Киборг-убийца"
 
-    # Словарь тарифов (НОВАЯ СИСТЕМА)
-    sub_map = {
-        "free": "🆓 Free",
-        "lite": "🥉 Lite",
-        "standard": "🥈 Standard",
-        "ultra": "🥇 Ultra"
-    }
-    
-    # Берем статус из subscription_level (то, что прилетает при оплате)
-    current_status = sub_map.get(user.subscription_level, "🆓 Free")
-    
+    # Формируем главную шапку с тарифом
+    current_sub = SUB_MAP.get(user.subscription_level, "🆓 Бесплатный")
+    expire_text = ""
     if user.subscription_expires_at:
-        date_str = user.subscription_expires_at.strftime('%d.%m.%y')
-        current_status += f" (до {date_str})"
+        date_str = user.subscription_expires_at.strftime("%d.%m.%Y")
+        expire_text = f" <i>(до {date_str})</i>"
+    
+    tariff_header = f"💳 <b>Текущий тариф:</b> {current_sub}{expire_text}\n\n"
 
     txt_name = html.escape(user.name or "Атлет")
     txt_age = user.age or "-"
@@ -77,7 +78,14 @@ async def get_full_profile_text(user, session: AsyncSession) -> str:
     txt_days = f"{user.workout_days} дн/нед" if user.workout_days else "-"
     txt_time = f"{user.notification_time}:00" if user.notification_time is not None else "Откл"
 
+    # Формируем компактный статус для блока лимитов
+    short_sub_map = {"free": "🆓 Free", "lite": "🥉 Lite", "standard": "🥈 Standard", "ultra": "🥇 Ultra"}
+    short_status = short_sub_map.get(user.subscription_level, "🆓 Free")
+    if user.subscription_expires_at:
+        short_status += f" (до {user.subscription_expires_at.strftime('%d.%m.%y')})"
+
     return (
+        f"{tariff_header}"
         f"👤 <b>Профиль: {txt_name}</b>\n"
         f"──────────────────\n"
         f"🏆 <b>Ранг:</b> {rank}\n"
@@ -91,10 +99,10 @@ async def get_full_profile_text(user, session: AsyncSession) -> str:
         f"💪 <b>Уровень:</b> {txt_level}\n"
         f"📅 <b>Режим:</b> {txt_days}\n"
         f"──────────────────\n"
-        f"💎 <b>Статус:</b> {current_status}\n"  # Теперь показывает реально оплаченное
+        f"💎 <b>Статус:</b> {short_status}\n"
         f"📊 <b>Остаток лимитов:</b>\n"
-        f"├ 🍏 Питание/Трен/Анализ: <b>{user.workout_limit}</b>\n"
-        f"└ 💬 Вопросы AI: <b>{user.chat_limit}</b>\n"
+        f"├ 🍏 Питание/💪 Трен/📊 Анализ: <b>{user.workout_limit}</b>\n"
+        f"└ 💬 Чат и запись: <b>{user.chat_limit}</b>\n"
         f"──────────────────\n"
         f"⏰ <b>Уведомления:</b> {txt_time}"
     )
@@ -104,12 +112,10 @@ def get_profile_keyboard(user):
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
     
-    # Показываем кнопку покупки, если подписка "free"
     if user.subscription_level == "free" or user.subscription_level is None:
         kb.row(InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy_premium"))
     
     kb.row(InlineKeyboardButton(text="📖 Дневник весов", callback_data="exercise_diary"))
-    # ... остальные кнопки
     kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
     kb.row(InlineKeyboardButton(text="🔄 Начать новый цикл", callback_data="confirm_new_cycle"))
     
@@ -126,29 +132,7 @@ async def show_profile_view(message: Message, session: AsyncSession, state: FSMC
         await message.answer("Сначала пройдите регистрацию: /start")
         return
         
-    # Принудительно обновляем данные пользователя, чтобы точно увидеть оплату (сброс кэша)
-    await session.refresh(user)
-    
-    # Твой исходный вызов получения текста с рангом
-    base_text = await get_full_profile_text(user, session)
-
-    # --- ДОБАВЛЯЕМ ЛОГИКУ ВЫВОДА ТАРИФА ---
-    sub_map = {
-        "free": "🆓 Бесплатный",
-        "lite": "🥉 Лайт",
-        "standard": "🥈 Стандарт",
-        "ultra": "🥇 Ультра"
-    }
-    # Берем тариф из базы или ставим 'free' по умолчанию
-    current_sub = sub_map.get(user.subscription_level, "🆓 Бесплатный")
-    
-    expire_text = ""
-    if user.subscription_expires_at:
-        date_str = user.subscription_expires_at.strftime("%d.%m.%Y")
-        expire_text = f" <i>(до {date_str})</i>"
-        
-    # Приклеиваем красивый тариф в самое начало твоего текста профиля
-    final_text = f"💳 <b>Текущий тариф:</b> {current_sub}{expire_text}\n\n{base_text}"
+    final_text = await get_full_profile_text(user, session)
 
     await message.answer(
         text=final_text, 
@@ -185,18 +169,36 @@ async def show_edit_menu(event, session: AsyncSession, state: FSMContext):
     else:
         await message.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
+# --- 5. ОБРАБОТЧИК КНОПКИ "НАЗАД/ЗАКРЫТЬ" (ЕДИНЫЙ) ---
 @router.callback_query(F.data == "close_edit_menu")
 async def close_edit(callback: CallbackQuery, session: AsyncSession):
     user = await UserCRUD.get_user(session, callback.from_user.id)
+    if not user:
+        await callback.answer("Ошибка: пользователь не найден.", show_alert=True)
+        return
+        
     text = await get_full_profile_text(user, session)
     
-    await callback.message.edit_text(
-        text=text,
-        reply_markup=get_profile_keyboard(user),
-        parse_mode="HTML"
-    )
+    try:
+        await callback.message.edit_text(
+            text=text,
+            reply_markup=get_profile_keyboard(user),
+            parse_mode="HTML"
+        )
+    except Exception:
+        try:
+            await callback.message.delete()
+        except:
+            pass
+        await callback.message.answer(
+            text=text,
+            reply_markup=get_profile_keyboard(user),
+            parse_mode="HTML"
+        )
 
-# --- 5. ЛОГИКА ВВОДА ДАННЫХ ---
+    await callback.answer()
+
+# --- 6. ЛОГИКА ВВОДА ДАННЫХ ---
 async def return_to_edit(message: Message, session: AsyncSession, state: FSMContext):
     await show_edit_menu(message, session, state)
 
@@ -216,7 +218,6 @@ async def save_weight(message: Message, state: FSMContext, session: AsyncSession
         else: await message.answer("❌ Введите реальный вес (30-250).")
     except: await message.answer("❌ Введите число.")
 
-# (Аналогично для Роста и Возраста)
 @router.callback_query(F.data == "prof_height")
 async def ask_height(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("📏 Введите новый рост (см):")
@@ -243,13 +244,12 @@ async def save_age(message: Message, state: FSMContext, session: AsyncSession):
         await return_to_edit(message, session, state)
     else: await message.answer("❌ Введите число (10-100).")
 
-# Кнопки выбора (Цель, Активность и т.д.)
 @router.callback_query(F.data == "prof_goal")
 async def ask_goal(callback: CallbackQuery):
     await callback.message.delete()
     await callback.message.answer("🎯 Выберите цель:", reply_markup=get_goal_keyboard())
 
-@router.message(F.text.in_(GOAL_MAP.values()))
+@router.message(StateFilter(None), F.text.in_(GOAL_MAP.values()))
 async def save_goal(message: Message, session: AsyncSession, state: FSMContext):
     code = next((k for k, v in GOAL_MAP.items() if v == message.text), None)
     if code:
@@ -261,7 +261,7 @@ async def ask_activity(callback: CallbackQuery):
     await callback.message.delete()
     await callback.message.answer("🏃 Выберите активность:", reply_markup=get_activity_keyboard())
 
-@router.message(F.text.in_(ACTIVITY_MAP.values()) | F.text.contains("Сидячий") | F.text.contains("Малая") | F.text.contains("Средняя") | F.text.contains("Высокая"))
+@router.message(StateFilter(None), F.text.in_(ACTIVITY_MAP.values()) | F.text.contains("Сидячий") | F.text.contains("Малая") | F.text.contains("Средняя") | F.text.contains("Высокая"))
 async def save_activity(message: Message, session: AsyncSession, state: FSMContext):
     val = "sedentary"
     if "Малая" in message.text: val = "light"
@@ -276,7 +276,7 @@ async def ask_level(callback: CallbackQuery):
     await callback.message.delete()
     await callback.message.answer("💪 Выберите уровень:", reply_markup=get_workout_level_keyboard())
 
-@router.message(F.text.in_(LEVEL_MAP.values()) | F.text.contains("Новичок") | F.text.contains("Любитель") | F.text.contains("Продвинутый"))
+@router.message(StateFilter(None), F.text.in_(LEVEL_MAP.values()) | F.text.contains("Новичок") | F.text.contains("Любитель") | F.text.contains("Продвинутый"))
 async def save_level(message: Message, session: AsyncSession, state: FSMContext):
     code = "beginner"
     if "Любитель" in message.text: code = "intermediate"
@@ -289,7 +289,7 @@ async def ask_days(callback: CallbackQuery):
     await callback.message.delete()
     await callback.message.answer("📅 Дней в неделю:", reply_markup=get_workout_days_keyboard())
 
-@router.message(F.text.contains("дн") | F.text.regexp(r'^\d+$'))
+@router.message(StateFilter(None), F.text.contains("дн") | F.text.regexp(r'^\d+$'))
 async def save_days(message: Message, session: AsyncSession, state: FSMContext):
     try:
         d = int(re.search(r'\d+', message.text).group())
@@ -302,13 +302,13 @@ async def ask_gender(callback: CallbackQuery):
     await callback.message.delete()
     await callback.message.answer("👫 Ваш пол:", reply_markup=get_gender_keyboard())
 
-@router.message(F.text.in_(GENDER_MAP.values()))
+@router.message(StateFilter(None), F.text.in_(GENDER_MAP.values()))
 async def save_gender(message: Message, session: AsyncSession, state: FSMContext):
     code = "male" if "Мужской" in message.text else "female"
     await UserCRUD.update_user(session, message.from_user.id, gender=code)
     await return_to_edit(message, session, state)
 
-# --- 6. НАСТРОЙКА ВРЕМЕНИ ---
+# --- 7. НАСТРОЙКА ВРЕМЕНИ И ОПЛАТА ---
 @router.callback_query(F.data == "change_notif_time")
 async def ask_notif_time(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
@@ -323,44 +323,43 @@ async def ask_notif_time(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-@router.callback_query(F.data.startswith("set_time_"))
-async def save_notif_time(callback: CallbackQuery, session: AsyncSession):
-    hour = int(callback.data.split("_")[-1])
-    await UserCRUD.update_user(session, callback.from_user.id, notification_time=hour)
-    await callback.answer(f"Время установлено: {hour}:00")
-    
-    user = await UserCRUD.get_user(session, callback.from_user.id)
-    text = await get_full_profile_text(user, session)
-    
-    await callback.message.edit_text(
-        text=text,
-        reply_markup=get_profile_keyboard(user),
-        parse_mode="HTML"
-    )
-
 @router.callback_query(F.data == "buy_premium")
 async def process_buy_premium(callback: CallbackQuery):
     await callback.answer("💳 Модуль оплаты будет доступен в следующем обновлении!", show_alert=True)
 
+@router.callback_query(F.data.startswith("set_time_"))
+async def save_notif_time(callback: CallbackQuery, session: AsyncSession):
+    try:
+        hour = int(callback.data.split("_")[2])
+        await UserCRUD.update_user(session, callback.from_user.id, notification_time=hour)
+        
+        user = await UserCRUD.get_user(session, callback.from_user.id)
+        if not user:
+            await callback.answer("Ошибка: пользователь не найден.", show_alert=True)
+            return
+            
+        text = await get_full_profile_text(user, session)
+        await callback.message.edit_text(text, reply_markup=get_profile_keyboard(user), parse_mode="HTML")
+        await callback.answer(f"✅ Время уведомлений установлено на {hour}:00")
+    except Exception:
+        await callback.answer("❌ Произошла ошибка при установке времени.", show_alert=True)    
+
 # ==========================================
-# ДНЕВНИК РАБОЧИХ ВЕСОВ
+# 8. ДНЕВНИК РАБОЧИХ ВЕСОВ
 # ==========================================
 @router.callback_query(F.data == "exercise_diary")
 async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     user_id = callback.from_user.id
     user = await UserCRUD.get_user(session, user_id)
     
-    # 🚨 ВАЖНО: У тебя здесь стояла проверка на подписку (sub_level < 2).
-    # Я оставил ее, как было. Если дневник должен быть у всех, просто удали эти 4 строки:
     from handlers.admin import is_admin
     if not is_admin(user_id) and user.subscription_level in ["free", "lite", None]:
         await callback.answer("📖 Дневник рабочих весов доступен начиная с тарифа Standard!", show_alert=True)
         return
     
-    # ИСПРАВЛЕНО: Теперь читаем из WorkoutLog, а не ExerciseLog
     stmt = select(WorkoutLog).where(
         WorkoutLog.user_id == user_id,
-        WorkoutLog.weight > 0 # Берем только те записи, где реально есть вес
+        WorkoutLog.weight > 0
     ).order_by(desc(WorkoutLog.date))
     
     result = await session.execute(stmt)
@@ -370,37 +369,28 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("Твой дневник пока пуст! Записывай веса во время тренировок.", show_alert=True)
         return
         
-    # Оставляем только самую последнюю запись для каждого упражнения
     latest_logs = {}
     for log in logs:
-        # Используем canonical_name, если оно есть, иначе exercise_name
         name = log.canonical_name if log.canonical_name else log.exercise_name
-        
         if not name:
-            continue # Пропускаем пустые названия
+            continue
 
         name_key = name.lower().strip()
         if name_key not in latest_logs:
             latest_logs[name_key] = log
             
-    # Формируем красивое сообщение
     text = "📖 <b>Твой дневник рабочих весов:</b>\n\n"
     
     for log in latest_logs.values():
-        date_str = log.date.strftime("%d.%m") # Формат даты: 26.02
-        
-        # Убираем ".0", если вес целое число (например, 80.0 -> 80)
+        date_str = log.date.strftime("%d.%m")
         weight_display = int(log.weight) if log.weight.is_integer() else log.weight
-        
         name = log.canonical_name if log.canonical_name else log.exercise_name
-        
         text += f"🏋️‍♂️ <b>{name.capitalize()}:</b> {weight_display} кг х {log.reps} <i>({date_str})</i>\n"
         
     text += "\n<i>💡 Чтобы обновить результат или исправить ошибку, просто запиши новый вес для этого упражнения на тренировке.</i>"
     
-    # Кнопка возврата в профиль
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="close_edit_menu")]
     ])
     
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")    
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")

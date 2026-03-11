@@ -174,6 +174,8 @@ async def request_ai_workout(message: Message, session: AsyncSession, state: FSM
 @router.callback_query(F.data == "select_weekly_workout")
 async def process_weekly_workout_selection(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, callback.from_user.id)
+    user.completed_workouts += 1
+    await session.commit()
     
     # ПРОВЕРКА НАЛИЧИЯ СТАРОЙ ПРОГРАММЫ
     if user.current_workout_program:
@@ -801,11 +803,11 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
                         canonical_name=canon_name,
                         weight=weight,
                         reps=reps,
-                        sets=sets,
+                        sets=1,
                         date=datetime.datetime.now() # Добавил дату, чтобы дневник видел записи
                     )
                     session.add(new_log)
-                    saved_exercises.append(f"🔹 <b>{canon_name}</b>\n└ {weight}кг x {reps} (подходов: {sets})")
+                    saved_exercises.append(f"🔹 <b>{canon_name}</b>\n└ {weight} кг x {reps}")
                 except Exception as parse_err:
                     print(f"⚠️ Ошибка парсинга строки: {line} | {parse_err}")
                     continue
@@ -815,7 +817,7 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
         
         # Списываем лимит только при успешной записи
         if saved_exercises and not is_admin(message.from_user.id):
-            user.workout_limit -= 1
+            user.chat_limit -= 1
             await session.commit()
 
         # Формируем ответ пользователю

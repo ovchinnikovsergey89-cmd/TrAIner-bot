@@ -1,4 +1,5 @@
 import io
+import re  # <--- Обязательно добавь это!
 import matplotlib
 matplotlib.use('Agg') # Анти-GUI бэкенд для сервера
 import matplotlib.pyplot as plt
@@ -39,34 +40,45 @@ class GraphService:
         fig.patch.set_facecolor('#1e1e1e')
         ax.set_facecolor('#1e1e1e')
         
-        # Группируем веса по упражнениям
         ex_dict = defaultdict(list)
         for ex in exercises:
-            if not ex.exercise_name:  # ДОБАВЛЕНО
-                continue
-            name = ex.exercise_name.capitalize()
-            ex_dict[name].append((ex.date, ex.weight))
+                # 1. Берем нормализованное имя (если есть), иначе обычное
+                raw_name = ex.canonical_name if ex.canonical_name else ex.exercise_name
+                if not raw_name:
+                    raw_name = "Упражнение"
+                    
+                # 2. ЖЕСТКАЯ ОЧИСТКА (удаляем лишние пробелы, приводим всё к нижнему регистру, меняем Ё на Е)
+                import re
+                clean_name = re.sub(r'\s+', ' ', str(raw_name)).strip().lower().replace('ё', 'е').capitalize()
+                
+                # 3. Добавляем в словарь уже идеально чистое имя
+                ex_dict[clean_name].append((ex.date, ex.weight))
             
-        # Берем Топ-3 самых частых упражнения, чтобы не захламлять график
-        top_exercises = sorted(ex_dict.keys(), key=lambda k: len(ex_dict[k]), reverse=True)[:3]
+        # Берем Топ-3 упражнения
+        top_ex = sorted(ex_dict.keys(), key=lambda k: len(ex_dict[k]), reverse=True)[:3]
         colors = ['#00a8ff', '#e84118', '#fbc531']
         
-        for i, name in enumerate(top_exercises):
-            data = sorted(ex_dict[name], key=lambda x: x[0]) # Сортируем по дате
-            dates = [d[0] for d in data]
-            weights = [d[1] for d in data]
-            
-            if len(dates) > 1:
-                ax.plot(dates, weights, marker='o', label=name, color=colors[i%3], linewidth=2)
-            else:
-                ax.scatter(dates, weights, label=name, color=colors[i%3], s=60)
-                
-        if not ax.has_data(): return None
+        plotted = False
+        for i, name in enumerate(top_ex):
+            data = sorted(ex_dict[name], key=lambda x: x[0])
+            if len(data) > 0:
+                plotted = True
+                dates = [d[0] for d in data]
+                weights = [d[1] for d in data]
+                if len(data) > 1:
+                    ax.plot(dates, weights, marker='o', label=name, color=colors[i%3])
+                else:
+                    # Если всего 1 подход, рисуем точку и она 100% отобразится
+                    ax.scatter(dates, weights, label=name, color=colors[i%3], zorder=5)
+
+        if not plotted:
+            plt.close(fig)
+            return None
 
         ax.set_title('Прогресс рабочих весов (Топ-3)', color='white', pad=15, fontsize=14)
         ax.grid(color='white', alpha=0.1)
         ax.tick_params(colors='white')
-        ax.legend(facecolor='#2f3640', edgecolor='none', labelcolor='white')
+        ax.legend(facecolor='#1e1e1e', edgecolor='white', labelcolor='white') # Добавили легенду
         fig.autofmt_xdate()
         
         buf = io.BytesIO()
@@ -133,11 +145,22 @@ class GraphService:
         ax2.tick_params(colors='white')
             
         # 3. Тренировки
+        # 3. Тренировки
         ax3.set_facecolor('#1e1e1e')
         if exercises:
             ex_dict = defaultdict(list)
             for ex in exercises:
-                ex_dict[ex.exercise_name.capitalize()].append((ex.date, ex.weight))
+                # 1. Достаем имя
+                raw_name = ex.canonical_name if ex.canonical_name else ex.exercise_name
+                if not raw_name:
+                    continue
+                
+                # 2. ЖЕСТКАЯ ОЧИСТКА
+                # Убираем все пробелы, приводим к нижнему регистру, меняем Ё на Е
+                clean_name = re.sub(r'\s+', ' ', raw_name).strip().lower().replace('ё', 'е').capitalize()
+                
+                ex_dict[clean_name].append((ex.date, ex.weight))
+
             top_ex = sorted(ex_dict.keys(), key=lambda k: len(ex_dict[k]), reverse=True)[:3]
             colors = ['#00a8ff', '#e84118', '#fbc531']
             for i, name in enumerate(top_ex):

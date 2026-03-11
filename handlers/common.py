@@ -45,8 +45,8 @@ async def cmd_cancel(message: Message, state: FSMContext):
 # УНИВЕРСАЛЬНЫЙ ПЕРЕХВАТЧИК INLINE-КНОПОК
 # ==========================================
 @router.callback_query(F.data.in_([
-    "back", "close", "cancel", "back_to_main", "close_edit_menu"
-]), StateFilter("*")) # Звездочка позволяет ловить кнопку В ЛЮБОМ состоянии!
+    "back", "close", "cancel", "back_to_main"
+]), StateFilter("*")) # УБРАЛИ "close_edit_menu"
 async def universal_cancel_callback(callback: CallbackQuery, state: FSMContext):
     # 1. Сбрасываем любые зависшие состояния (ожидание веса, возраста и т.д.)
     current_state = await state.get_state()
@@ -59,7 +59,7 @@ async def universal_cancel_callback(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass # Игнорируем ошибку, если сообщение уже нельзя удалить
         
-    # 4. Гасим "часики" загрузки на самой кнопке
+    # 3. Гасим "часики" загрузки на самой кнопке
     await callback.answer()
 
 # --- ВХОД В ПОИСК (Эту оставляем без изменений) ---

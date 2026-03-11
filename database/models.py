@@ -21,6 +21,7 @@ class User(Base):
     goal = Column(String, nullable=True)
     workout_level = Column(String, nullable=True)
     workout_days = Column(Integer, default=3)
+    completed_workouts = Column(Integer, default=0)
     
     # --- СИСТЕМА МОНЕТИЗАЦИИ (старые поля для совместимости) ---
     is_premium = Column(Boolean, default=False)

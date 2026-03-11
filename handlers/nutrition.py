@@ -506,6 +506,14 @@ async def process_nutrition_input(message: Message, session: AsyncSession, state
                 except ValueError: continue
         
         await session.commit()
+
+        # 🔥 ВОТ ЭТОТ БЛОК НУЖНО ДОБАВИТЬ:
+        # Списываем лимит "Вопросы и Запись" (chat_limit)
+        from handlers.admin import is_admin
+        user = await UserCRUD.get_user(session, message.from_user.id)
+        if added_logs_ids and not is_admin(message.from_user.id):
+            user.chat_limit -= 1
+            await session.commit()
         
         # 🔥 СОХРАНЯЕМ ID В ПАМЯТЬ СОСТОЯНИЯ ДЛЯ КНОПКИ "ОТМЕНА"
         if added_logs_ids:

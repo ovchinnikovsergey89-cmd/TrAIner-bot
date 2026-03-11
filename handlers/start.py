@@ -57,36 +57,60 @@ async def process_gender(message: Message, state: FSMContext):
 # 2. ВОЗРАСТ -> ВЕС
 @router.message(Registration.age)
 async def process_age(message: Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("Пожалуйста, введи число.")
-        return
-    
-    await state.update_data(age=int(message.text))
-    await message.answer("Введи свой вес (кг):")
-    await state.set_state(Registration.weight)
+    try:
+        age = int(message.text.strip())
+        
+        # Проверка диапазона
+        if not (10 <= age <= 90):
+            await message.answer("🤔 Укажи, пожалуйста, реальный возраст (от 10 до 90 лет):")
+            return
+            
+        await state.update_data(age=age)
+        await message.answer("⚖️ Принято! Теперь введи свой вес (кг). Можно через точку или запятую:")
+        await state.set_state(Registration.weight)
+        
+    except ValueError:
+        await message.answer("⚠️ Пожалуйста, введи возраст числом (например: 25):")
 
 # 3. ВЕС -> РОСТ
 @router.message(Registration.weight)
 async def process_weight(message: Message, state: FSMContext):
     try:
-        w = float(message.text.replace(',', '.'))
+        # 🔥 ИСПРАВЛЕНИЕ: убираем пробелы и меняем запятую на точку
+        clean_input = message.text.strip().replace(',', '.')
+        w = float(clean_input)
+        
+        # Проверка на адекватность веса (от 30 до 250 кг)
+        if not (30 <= w <= 250):
+            await message.answer("🤔 Хмм, кажется вес указан неверно. Введи реальный вес (от 30 до 250 кг):")
+            return
+
         await state.update_data(weight=w)
-        await message.answer("Введи свой рост (см):")
+        await message.answer("📏 Отлично! Теперь введи свой рост в см (например: 180):")
         await state.set_state(Registration.height)
+        
     except ValueError:
-        await message.answer("Введи число (например 75.5)")
+        await message.answer("⚠️ Пожалуйста, введи только число (например: 75.5 или 80).")
 
 # 4. РОСТ -> ЦЕЛЬ
 @router.message(Registration.height)
 async def process_height(message: Message, state: FSMContext):
     try:
-        h = float(message.text.replace(',', '.'))
-        await state.update_data(height=h)
+        # Убираем пробелы и меняем запятую на точку (на случай если введут 180.5)
+        clean_input = message.text.strip().replace(',', '.')
+        h = float(clean_input)
         
-        await message.answer("Твоя цель?", reply_markup=get_goal_keyboard())
+        # Проверка диапазона
+        if not (100 <= h <= 250):
+            await message.answer("🤔 Кажется, в росте ошибка. Введи рост в сантиметрах (от 100 до 250):")
+            return
+            
+        await state.update_data(height=h)
+        await message.answer("🎯 Почти готово! Какая у тебя цель?", reply_markup=get_goal_keyboard())
         await state.set_state(Registration.goal)
+        
     except ValueError:
-        await message.answer("Введи число.")
+        await message.answer("⚠️ Пожалуйста, введи рост числом (например: 175):")
 
 # 5. ЦЕЛЬ -> УРОВЕНЬ
 @router.message(Registration.goal)

@@ -23,13 +23,32 @@ class UserCRUD:
     
     @staticmethod
     async def get_weekly_workouts_count(session: AsyncSession, telegram_id: int) -> int:
-        from database.models import WorkoutLog
-        # Считаем количество записей в логах за последние 7 дней
+        from database.models import WorkoutLog, WorkoutProgramHistory
+        
+        # 1. Ищем дату начала текущего цикла (последней сгенерированной программы)
+        latest_prog_query = select(WorkoutProgramHistory.created_at).where(
+            WorkoutProgramHistory.user_id == telegram_id
+        ).order_by(WorkoutProgramHistory.created_at.desc()).limit(1)
+        
+        result_prog = await session.execute(latest_prog_query)
+        program_start_date = result_prog.scalar()
+        
+        # 2. Определяем точку отсчета: берем последние 7 дней, НО если новый цикл
+        # начался позже, то считаем только с его начала
         one_week_ago = datetime.now() - timedelta(days=7)
+        if program_start_date and program_start_date > one_week_ago:
+            start_date = program_start_date
+        else:
+            start_date = one_week_ago
+            
+        # 3. Идеальный подсчет: считаем ТОЛЬКО отметки о завершении дня 
+        # (те самые нажатия кнопки "✅ Тренировка выполнена")
         query = select(func.count(WorkoutLog.id)).where(
             WorkoutLog.user_id == telegram_id,
-            WorkoutLog.date >= one_week_ago
+            WorkoutLog.date >= start_date,
+            WorkoutLog.workout_type.like("Тренировка День%") # <--- СТРОГИЙ ФИЛЬТР ПО КНОПКЕ
         )
+        
         result = await session.execute(query)
         return result.scalar() or 0
     
@@ -101,12 +120,36 @@ class UserCRUD:
         except:
             pass
 
+        # === НОВЫЙ БЛОК: СТАТИСТИКА ПО ТАРИФАМ ===
+        # Считаем Free (явно указан free ИЛИ тариф еще не назначен)
+        free = await session.scalar(
+            select(func.count(User.telegram_id)).where(
+                (User.subscription_level == 'free') | (User.subscription_level.is_(None))
+            )
+        ) or 0
+        
+        lite = await session.scalar(
+            select(func.count(User.telegram_id)).where(User.subscription_level == 'lite')
+        ) or 0
+        
+        standard = await session.scalar(
+            select(func.count(User.telegram_id)).where(User.subscription_level == 'standard')
+        ) or 0
+        
+        ultra = await session.scalar(
+            select(func.count(User.telegram_id)).where(User.subscription_level == 'ultra')
+        ) or 0
+
         return {
             'total': total,
             'active_profile': active,
             'has_workout': workouts,
             'has_nutrition': nutrition,
-            'active_24h': active_24h
+            'active_24h': active_24h,
+            'free_users': free,
+            'lite_users': lite,
+            'standard_users': standard,
+            'ultra_users': ultra
         }
     
     @staticmethod

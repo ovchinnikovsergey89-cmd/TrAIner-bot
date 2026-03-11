@@ -37,6 +37,7 @@ async def start_chat_logic(message: Message, state: FSMContext):
 
 @router.message(F.text == "💬 Чат с тренером")
 async def start_chat_text(message: Message, state: FSMContext):
+    await state.set_state(AIChatState.chatting) # <--- 🔴 ДОБАВЛЯЕМ ЭТУ СТРОЧКУ
     await start_chat_logic(message, state)
 
 # --- ОБРАБОТКА КОМАНДЫ /RESET ---
