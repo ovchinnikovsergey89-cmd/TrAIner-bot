@@ -88,32 +88,82 @@ class GraphService:
         return buf
 
     @staticmethod
-    async def create_nutrition_graph(nut_days):
+    async def create_nutrition_graph(nut_days, user_sub="free"):
         if not nut_days: 
             return None
             
-        fig, ax = plt.subplots(figsize=(8, 4))
-        fig.patch.set_facecolor('#1e1e1e')
-        ax.set_facecolor('#1e1e1e')
+        import numpy as np
+        from scipy.interpolate import make_interp_spline
+
+        # 1. Агрегация данных по дням
+        daily = {}
+        for row in nut_days:
+            day_str = str(row.day)[-5:]
+            if day_str not in daily:
+                daily[day_str] = {'k': 0, 'p': 0, 'f': 0, 'c': 0}
+            daily[day_str]['k'] += float(row.kcal or 0)
+            daily[day_str]['p'] += float(row.p or 0)
+            daily[day_str]['f'] += float(row.f or 0)
+            daily[day_str]['c'] += float(row.c or 0)
+
+        days = sorted(daily.keys())
+        if not days: return None
         
-        # Оставляем только Месяц-День (например, 02-27), чтобы график был красивым
-        days = [str(d.day)[-5:] for d in nut_days] 
-        kcals = [d.kcal for d in nut_days]
+        # Создаем "двухэтажную" сетку (2 строки, 1 колонка)
+        # Калории сверху (узкие), БЖУ снизу (высокие)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [1, 2]})
+        fig.patch.set_facecolor('#121212')
+
+        # --- ВЕРХНИЙ ЭТАЖ: КАЛОРИИ ---
+        kcals = [daily[d]['k'] for d in days]
+        ax1.set_facecolor('#121212')
+        ax1.bar(days, kcals, color='#00a8ff', alpha=0.3, width=0.5)
         
-        ax.bar(days, kcals, color='#4cd137', alpha=0.8, width=0.5)
+        avg_kcal = sum(kcals)/len(kcals)
+        ax1.axhline(avg_kcal, color='#00a8ff', linestyle='--', alpha=0.5, linewidth=1)
+        ax1.text(len(days)-1, avg_kcal, f' Ср: {int(avg_kcal)}', color='#00a8ff', va='bottom', fontsize=9)
         
-        # Добавляем пунктирную линию среднего значения калорий
-        if kcals:
-            avg_kcal = sum(kcals) / len(kcals)
-            ax.axhline(avg_kcal, color='#e84118', linestyle='--', linewidth=1.5, label=f'Среднее: {int(avg_kcal)} ккал')
+        ax1.set_title('ПОТРЕБЛЕНИЕ ЭНЕРГИИ (ккал)', color='white', loc='left', fontsize=10, fontweight='bold')
+        ax1.tick_params(colors='white', labelsize=8)
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        ax1.xaxis.set_visible(False) # Скрываем даты на верхнем графике
+
+        # --- НИЖНИЙ ЭТАЖ: БЖУ ---
+        ax2.set_facecolor('#121212')
+        x_numeric = np.arange(len(days))
+        x_smooth = np.linspace(x_numeric.min(), x_numeric.max(), 300)
+
+        nutrients = [('Белки', 'p', '#ff4757'), ('Жиры', 'f', '#ffa502'), ('Углеводы', 'c', '#2ed573')]
+
+        for label, key, color in nutrients:
+            y_values = [daily[d][key] for d in days]
             
-        ax.set_title('Потребление калорий (7 дней)', color='white', pad=15, fontsize=14)
-        ax.grid(color='white', alpha=0.1, axis='y')
-        ax.tick_params(colors='white')
-        ax.legend(facecolor='#2f3640', edgecolor='none', labelcolor='white')
-        
+            # Линии и сглаживание
+            if len(days) > 2:
+                spl = make_interp_spline(x_numeric, y_values, k=2)
+                y_smooth = np.clip(spl(x_smooth), 0, None)
+                ax2.plot(x_smooth, y_smooth, color=color, linewidth=2.5, label=label)
+                ax2.fill_between(x_smooth, y_smooth, color=color, alpha=0.07)
+            else:
+                ax2.plot(days, y_values, color=color, marker='o', linewidth=2, label=label)
+
+            # Цифра над последней точкой
+            ax2.annotate(f'{int(y_values[-1])}г', xy=(len(days)-1, y_values[-1]), 
+                         xytext=(0, 7), textcoords='offset points', 
+                         color=color, fontweight='bold', ha='center', fontsize=10)
+
+        ax2.set_title('БАЛАНС НУТРИЕНТОВ (г)', color='white', loc='left', fontsize=10, fontweight='bold')
+        ax2.legend(loc='upper left', facecolor='none', edgecolor='none', labelcolor='white', fontsize=9, ncol=3)
+        ax2.tick_params(colors='white', labelsize=9)
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        ax2.set_ylim(bottom=0)
+
+        plt.tight_layout(pad=3.0)
+
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight')
+        plt.savefig(buf, format='png', dpi=130, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
         buf.seek(0)
         return buf

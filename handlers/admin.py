@@ -2,14 +2,15 @@ import time
 import datetime
 import logging
 import asyncio
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy.ext.asyncio import AsyncSession
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from sqlalchemy import select
 
-from database.models import PromoCode
+from database.models import PromoCode, User
 from database.crud import UserCRUD
 from config import Config
 
@@ -47,7 +48,8 @@ async def admin_panel_start(message: Message):
         [InlineKeyboardButton(text="📊 Живая статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="📢 Глобальная рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🔑 Управление юзером", callback_data="admin_users")],
-        [InlineKeyboardButton(text="🎟 Управление промокодами", callback_data="admin_list_promos")] # НОВАЯ КНОПКА
+        [InlineKeyboardButton(text="🎟 Управление промокодами", callback_data="admin_list_promos")], # НОВАЯ КНОПКА
+        [InlineKeyboardButton(text="📢 Массовая рассылка", callback_data="admin_broadcast")]
     ])
     
     await message.answer(
@@ -240,33 +242,37 @@ async def show_user_card(message: Message, state: FSMContext, session: AsyncSess
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🆔 ID: <code>{user.telegram_id}</code>\n"
             f"💎 Тариф: <b>{user.subscription_level.upper() if user.subscription_level else 'FREE'}</b>\n"
-            f"🍏 Планы: <b>{user.workout_limit}</b>\n"
-            f"💬 Чат: <b>{user.chat_limit}</b>\n"
+            f"🍏 Генераций: <b>{user.workout_limit}</b>\n"
+            f"💬 Вопросов: <b>{user.chat_limit}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"⚖️ Вес: {user.weight} | 📏 Рост: {user.height}\n"
             f"🎯 Цель: {user.goal}"
         )
 
-        # Добавляем кнопку удаления в клавиатуру
+        # Клавиатура с разделенными кнопками добавления лимитов
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💎 Сделать ULTRA", callback_data=f"set_level_ultra_{target_id}")],
             [InlineKeyboardButton(text="🥈 Сделать STANDARD", callback_data=f"set_level_standard_{target_id}")],
-            [InlineKeyboardButton(text="➕ Добавить +10 лимитов", callback_data=f"add_limits_{target_id}")],
-            [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"admin_delete_user_{target_id}")], # НОВАЯ КНОПКА
+            [InlineKeyboardButton(text="🥉 Сделать LITE", callback_data=f"set_level_lite_{target_id}")],
+            [
+                InlineKeyboardButton(text="➕ +5 генераций", callback_data=f"add_workouts_{target_id}"),
+                InlineKeyboardButton(text="➕ +10 вопросов", callback_data=f"add_chats_{target_id}")
+            ],
+            [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"admin_delete_user_{target_id}")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
         ])
-
+        
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
         await state.clear()
         
     except ValueError:
-        await message.answer("⚠️ Введи корректный числовой ID.")  
+        await message.answer("⚠️ Введи корректный числовой ID.")
 
+# --- ВЫДАЧА ТАРИФОВ И ОБНОВЛЕНИЕ ЛИМИТОВ ---
 @router.callback_query(F.data.startswith("set_level_"))
 async def change_user_level(callback: CallbackQuery, session: AsyncSession):
     if not is_admin(callback.from_user.id): return
     
-    # Разбираем callback (например: set_level_ultra_123456)
     parts = callback.data.split("_")
     new_level = parts[2]
     target_id = int(parts[3])
@@ -274,69 +280,81 @@ async def change_user_level(callback: CallbackQuery, session: AsyncSession):
     user = await UserCRUD.get_user(session, target_id)
     if user:
         user.subscription_level = new_level
-        # Если даем тариф, обновляем и лимиты
+        
+        # Строгая установка лимитов по новым правилам
         if new_level == 'ultra':
-            user.workout_limit = 100
+            user.workout_limit = 30
             user.chat_limit = 100
         elif new_level == 'standard':
-            user.workout_limit = 30
+            user.workout_limit = 20
             user.chat_limit = 50
+        elif new_level == 'lite':
+            user.workout_limit = 10
+            user.chat_limit = 20
+        elif new_level == 'free':
+            user.workout_limit = 3
+            user.chat_limit = 5
             
         await session.commit()
         await callback.answer(f"✅ Уровнь {new_level.upper()} установлен!", show_alert=True)
-        # Обновляем сообщение (вызываем карточку заново)
-        await callback.message.edit_text(f"✅ Статус пользователя {target_id} изменен на {new_level.upper()}.")              
-
-# 2. РАССЫЛКА
-@router.message(Command("broadcast"))
-async def admin_broadcast(message: Message, command: CommandObject, session: AsyncSession):
-    if not is_admin(message.from_user.id): return
-
-    text = command.args
-    if not text:
-        await message.answer("⚠️ Ошибка. Пиши: <code>/broadcast Привет всем!</code>")
-        return
-
-    users = await UserCRUD.get_all_users(session)
-    count = 0
-    
-    status_msg = await message.answer(f"🚀 Начинаю рассылку на {len(users)} чел...")
-    
-    for user in users:
-        try:
-            await message.bot.send_message(user.telegram_id, f"📢 <b>Новости от Тренера:</b>\n\n{text}", parse_mode="HTML")
-            count += 1
-            await asyncio.sleep(0.05) # Анти-спам задержка
-        except:
-            pass # Если юзер заблокировал бота
-            
-    await status_msg.edit_text(f"✅ Рассылка завершена!\nДоставлено: {count} из {len(users)}")
-
-# 3. БЭКАП БАЗЫ
-@router.message(Command("backup"))
-async def admin_backup(message: Message):
-    if not is_admin(message.from_user.id): return
-
-    try:
-        # Пытаемся найти файл базы данных
-        import os
-        filename = "db.sqlite3" # Стандартное имя
         
-        if not os.path.exists(filename):
-            filename = "trainer.db" # Альтернативное имя
-            
-        if os.path.exists(filename):
-            db_file = FSInputFile(filename)
-            await message.answer_document(db_file, caption=f"📦 Бэкап от {message.date.date()}")
-        else:
-            await message.answer("❌ Файл базы данных не найден в корне папки.")
-            
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        # Обновляем карточку без переотправки сообщения
+        text = (
+            f"👤 <b>Карточка пользователя</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 ID: <code>{user.telegram_id}</code>\n"
+            f"💎 Тариф: <b>{user.subscription_level.upper()}</b>\n"
+            f"🍏 Генераций: <b>{user.workout_limit}</b>\n"
+            f"💬 Вопросов: <b>{user.chat_limit}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⚖️ Вес: {user.weight} | 📏 Рост: {user.height}\n"
+            f"🎯 Цель: {user.goal}"
+        )
+        try:
+            await callback.message.edit_text(text, reply_markup=callback.message.reply_markup, parse_mode="HTML")
+        except:
+            pass
 
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-import time
+# --- РУЧНОЕ ДОБАВЛЕНИЕ ЛИМИТОВ ---
+@router.callback_query(F.data.startswith("add_workouts_"))
+async def add_admin_workouts(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id): return
+    
+    target_id = int(callback.data.split("_")[2])
+    user = await UserCRUD.get_user(session, target_id)
+    if user:
+        user.workout_limit = (user.workout_limit or 0) + 5
+        await session.commit()
+        await callback.answer("✅ Добавлено +5 генераций!", show_alert=True)
+        
+        # Динамическое обновление текста карточки
+        new_text = callback.message.html_text.replace(
+            f"🍏 Генераций: <b>{user.workout_limit - 5}</b>",
+            f"🍏 Генераций: <b>{user.workout_limit}</b>"
+        )
+        try:
+            await callback.message.edit_text(new_text, reply_markup=callback.message.reply_markup, parse_mode="HTML")
+        except: pass
+
+@router.callback_query(F.data.startswith("add_chats_"))
+async def add_admin_chats(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id): return
+    
+    target_id = int(callback.data.split("_")[2])
+    user = await UserCRUD.get_user(session, target_id)
+    if user:
+        user.chat_limit = (user.chat_limit or 0) + 10
+        await session.commit()
+        await callback.answer("✅ Добавлено +10 вопросов!", show_alert=True)
+        
+        # Динамическое обновление текста карточки
+        new_text = callback.message.html_text.replace(
+            f"💬 Вопросов: <b>{user.chat_limit - 10}</b>",
+            f"💬 Вопросов: <b>{user.chat_limit}</b>"
+        )
+        try:
+            await callback.message.edit_text(new_text, reply_markup=callback.message.reply_markup, parse_mode="HTML")
+        except: pass
 
 @router.message(Command("admin_boost"))
 async def admin_boost_cmd(message: Message, session: AsyncSession, state: FSMContext):
@@ -586,3 +604,81 @@ async def cancel_admin_delete_user(callback: CallbackQuery):
         f"🛡 Удаление пользователя <code>{target_id}</code> отменено.", 
         parse_mode="HTML"
     )        
+
+# ==========================================
+# МАССОВАЯ РАССЫЛКА
+# ==========================================
+@router.callback_query(F.data == "admin_broadcast")
+async def start_broadcast(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    
+    await callback.message.answer(
+        "📢 <b>Режим рассылки</b>\n\n"
+        "Отправь мне сообщение, которое нужно разослать всем пользователям бота.\n"
+        "<i>(Можно отправить текст, фото, видео или голосовое сообщение)</i>\n\n"
+        "Для отмены нажми /cancel",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminBroadcast.waiting_for_message)
+    await callback.answer()
+
+@router.message(AdminBroadcast.waiting_for_message)
+async def preview_broadcast(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    
+    # Сохраняем данные сообщения для копирования
+    await state.update_data(broadcast_message_id=message.message_id, from_chat_id=message.chat.id)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Начать рассылку", callback_data="confirm_broadcast")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_broadcast")]
+    ])
+    
+    await message.answer("👀 <b>Предпросмотр:</b> Вот так пользователи увидят сообщение 👇", parse_mode="HTML")
+    await message.copy_to(message.chat.id, reply_markup=kb)
+    await state.set_state(AdminBroadcast.waiting_for_confirm)
+
+@router.callback_query(F.data == "confirm_broadcast", AdminBroadcast.waiting_for_confirm)
+async def execute_broadcast(callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
+    if not is_admin(callback.from_user.id): return
+    
+    data = await state.get_data()
+    msg_id = data.get("broadcast_message_id")
+    chat_id = data.get("from_chat_id")
+    
+    await callback.message.edit_reply_markup(reply_markup=None)
+    status_msg = await callback.message.answer("⏳ <i>Рассылка запущена... Это может занять время.</i>", parse_mode="HTML")
+    
+    # Получаем ID всех пользователей из базы
+    stmt = select(User.telegram_id)
+    result = await session.execute(stmt)
+    user_ids = result.scalars().all()
+    
+    success = 0
+    failed = 0
+    
+    for uid in user_ids:
+        try:
+            await bot.copy_message(chat_id=uid, from_chat_id=chat_id, message_id=msg_id)
+            success += 1
+            await asyncio.sleep(0.05) # Защита от бана (лимит Telegram: ~30 сообщений в секунду)
+        except Exception:
+            failed += 1 # Юзер заблокировал бота или удалил аккаунт
+            
+    await status_msg.edit_text(
+        f"📢 <b>Рассылка завершена!</b>\n\n"
+        f"✅ Доставлено: <b>{success}</b>\n"
+        f"❌ Ошибок (блокировки): <b>{failed}</b>",
+        parse_mode="HTML"
+    )
+    await state.clear()
+    await callback.answer()
+
+@router.callback_query(F.data == "cancel_broadcast", AdminBroadcast.waiting_for_confirm)
+async def cancel_broadcast_handler(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    
+    await state.clear()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("❌ Рассылка отменена.")
+    await callback.answer()

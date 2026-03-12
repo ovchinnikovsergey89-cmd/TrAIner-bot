@@ -1,8 +1,14 @@
 import database.models  # Чтобы Alembic прочитал все твои классы таблиц
 import asyncio
-from database.database import Base
-from logging.config import fileConfig
+import sys
+from os.path import abspath, dirname
 
+# Добавляем корень проекта в пути, чтобы импорты сработали
+sys.path.insert(0, abspath(dirname(dirname(__file__))))
+
+from database.models import Base  # Путь к твоему файлу с моделями
+from logging.config import fileConfig
+from os.path import abspath, dirname
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -45,7 +51,7 @@ def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
-        target_metadata=target_metadata,
+        target_metadata = Base.metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -55,7 +61,7 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(connection=connection, target_metadata = Base.metadata)
 
     with context.begin_transaction():
         context.run_migrations()

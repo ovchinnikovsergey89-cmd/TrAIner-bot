@@ -2,10 +2,11 @@ import logging
 import re
 from aiogram import Router, F
 from aiogram.filters import CommandStart, CommandObject
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import datetime
 from database.crud import UserCRUD
 from database.models import WeightHistory
 from states.user_states import Registration
@@ -26,6 +27,79 @@ logger = logging.getLogger(__name__)
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, message.from_user.id)
+
+    # Если пользователя нет или он еще не принял соглашение
+    if not user or not getattr(user, 'is_agreed', False):
+        # Текст дисклеймера
+        disclaimer_text = (
+            "🤖 <b>TrAIner bot | Официальный доступ</b>\n\n"
+            "Добро пожаловать! Чтобы активировать ваш персональный ИИ-наставник и "
+            "начать расчет программ тренировок, необходимо подтвердить согласие с регламентом сервиса.\n\n"
+            "<b>Что это значит для вас?</b>\n"
+            "🛡 Ваше здоровье — ваша ответственность (консультируйтесь с врачом).\n"
+            "📊 Ваши данные в безопасности и используются только для расчетов.\n"
+            "🧠 рекомендации ИИ — это мощный инструмент, но не истина в последней инстанции.\n\n"
+            "<i>Ознакомьтесь с полной версией договора по кнопке ниже:</i>"
+        )
+        
+        # Ссылка на соглашение (можешь заменить на свою ссылку на Telegra.ph)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📄 Читать соглашение", url="https://drive.google.com/file/d/10zYEuPR925w3XzBIZa_STTlKw1QcTA5V/view?usp=sharing")],
+            [InlineKeyboardButton(text="✅ Принимаю и продолжаю", callback_data="accept_terms")]
+        ])
+        
+        # Если есть реферал, сохраним его в стейт временно, чтобы не потерять после нажатия кнопки
+        if command.args:
+            await state.update_data(referrer_id=command.args)
+            
+        await message.answer(disclaimer_text, reply_markup=kb, parse_mode="HTML")
+        return
+
+    # Если уже зарегистрирован и согласие есть — в главное меню
+    await message.answer(
+        f"👋 С возвращением, <b>{user.name}</b>!\nГотов к тренировке?", 
+        reply_markup=get_main_menu(),
+        parse_mode="HTML"
+    )
+
+# --- 2. ХЕНДЛЕР НАЖАТИЯ КНОПКИ "СОГЛАСЕН" ---
+@router.callback_query(F.data == "accept_terms")
+async def process_accept_terms(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    user = await UserCRUD.get_user(session, callback.from_user.id)
+    
+    if user:
+        # Старый юзер: просто фиксируем согласие
+        user.is_agreed = True
+        user.agreed_at = datetime.now()
+        await session.commit()
+        await callback.message.edit_text("✅ Согласие подтверждено! Рад видеть тебя снова.")
+        await callback.message.answer("Выберите действие:", reply_markup=get_main_menu())
+    else:
+        # Новый юзер: начинаем регистрацию
+        await callback.message.edit_text("✅ Согласие получено! Начнем настройку твоего профиля.")
+        
+        # ВНИМАНИЕ: Проверь название стейта в states/user_states.py!
+        # Если там написано "age = State()", то нужно Registration.age
+        # Если "waiting_age = State()", то Registration.waiting_age
+        
+        try:
+            # Пробуем самые вероятные варианты названий стейтов
+            if hasattr(Registration, 'age'):
+                await state.set_state(Registration.age)
+            elif hasattr(Registration, 'waiting_age'):
+                await state.set_state(Registration.waiting_age)
+            else:
+                # Если не нашли, выводим ошибку в консоль, чтобы ты увидел название
+                logger.error(f"Стейты в Registration: {Registration.__dict__.keys()}")
+                await callback.message.answer("⚠️ Ошибка конфигурации состояний. Обратитесь к админу.")
+                return
+
+            await callback.message.answer("Введите ваш возраст (полных лет):")
+        except Exception as e:
+            logger.error(f"Ошибка при установке стейта: {e}")
+            await callback.message.answer("❌ Произошла ошибка при начале регистрации.")
+    
+    await callback.answer()
     
     if user:
         await message.answer(
@@ -182,6 +256,15 @@ async def process_days(message: Message, state: FSMContext, session: AsyncSessio
     # Добавляем историю веса
     session.add(WeightHistory(user_id=message.from_user.id, weight=weight))
     await session.commit()
+
+    # ==========================================
+    # 🔥 НОВОЕ: Фиксируем согласие для новичка!
+    # ==========================================
+    new_user = await UserCRUD.get_user(session, message.from_user.id)
+    if new_user:
+        new_user.is_agreed = True
+        new_user.agreed_at = datetime.now()
+        await session.commit()
     
     # 🔥 НАЧИСЛЯЕМ БОНУС ЗА РЕГИСТРАЦИЮ (5 генераций, 10 вопросов) 🔥
     await UserCRUD.apply_registration_bonus(session, message.from_user.id)

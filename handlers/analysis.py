@@ -110,7 +110,8 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
         nut_days_raw = res_nut.all()
         
         if nut_days_raw:
-            graph_buf = await GraphService.create_nutrition_graph(nut_days_raw)
+            user_sub = user.subscription_level or "free"
+            graph_buf = await GraphService.create_nutrition_graph(nut_days_raw, user_sub)
             if graph_buf: 
                 graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="nutrition.png")
         

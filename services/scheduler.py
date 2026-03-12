@@ -3,11 +3,12 @@ import datetime
 import pytz
 import random
 from aiogram import Bot
-from sqlalchemy import update
+from sqlalchemy import update, select, func, desc
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from database.models import User
+from database.models import User, WorkoutLog, NutritionLog
 from database.crud import UserCRUD
+from services.ai_manager import AIManager
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +24,12 @@ async def send_morning_motivation(bot: Bot, session_pool: async_sessionmaker):
     """
     Запускается каждый час.
     Выбирает пользователей, у которых notification_time совпадает с текущим часом.
+    Индивидуальные сообщения для Premium тарифов.
     """
     msk_tz = pytz.timezone("Europe/Moscow")
-    now_hour = datetime.datetime.now(msk_tz).hour
+    now_msk = datetime.datetime.now(msk_tz)
+    now_hour = now_msk.hour
+    today = now_msk.date()
     
     logger.info(f"⏰ Scheduler tick: Checking users for {now_hour}:00")
 
@@ -37,39 +41,103 @@ async def send_morning_motivation(bot: Bot, session_pool: async_sessionmaker):
 
         motivations = [
             "Твое тело — это отражение твоих привычек. Начни день правильно! 💪",
-            "Маленькие шаги сегодня — большие результаты завтра. Погнали на тренировку? 🔥",
-            "Дисциплина — это решение делать то, что очень не хочется, чтобы достичь того, чего хочешь. 🏆",
-            "Доброе утро! Твой единственный лимит — это ты сам. Раздвинь границы! 🚀",
-            "Сила не в мышцах, сила в голове. Проснись и докажи себе, на что ты способен! 🧠✨",
-            "Успех не падает с неба, он куется в зале. Жду тебя на занятии! 🏋️‍♂️",
-            "Не жди вдохновения, создавай его своими действиями. Время действовать! ⚡",
-            "Каждая тренировка приближает тебя к лучшей версии себя. Не останавливайся! 📈",
-            "Твои оправдания не сожгут калории. Вставай и сделай это! 👊",
-            "Сегодня — идеальный день, чтобы стать сильнее, чем вчера! 🌟",
-            "Победа любит подготовленных. Ты готов выложиться на все 100? 🥇",
-            "Твое будущее 'Я' скажет тебе спасибо за сегодняшнюю тренировку. 🤝",
-            "Боль временна, триумф вечен. Оставь лень в кровати! ⏳🔥",
-            "Не сравнивай себя с другими. Сравнивай себя с тем, кем ты был вчера. 🔄",
-            "Сделай сегодня то, о чем другие завтра будут только мечтать. 💎",
-            "Помни, зачем ты начал. Твоя цель ближе, чем кажется! 🎯",
-            "Прогресс — это не прямая линия. Главное — продолжать движение! 📉📈",
-            "Твое здоровье — это самая выгодная инвестиция. Инвестируй время в себя! 🍎",
-            "Двигайся вперед, даже если темп кажется медленным. Ты всё равно обгоняешь тех, кто лежит на диване. 🐢💨",
-            "Верь в себя так же сильно, как я верю в твой потенциал. Ты машина! 🤖💪"
+            "Маленькие шаги каждый день ведут к большим результатам. Не останавливайся! 🚀",
+            "Единственная плохая тренировка — та, которой не было. Вперед! 🏋️‍♂️",
+            "Дисциплина — это мост между целями и достижениями. Построй свой мост сегодня! 🌉",
+            "Ты сильнее, чем думаешь. Докажи это себе сегодня! 💥",
+            "Не жди идеального момента, создай его! Время действовать. 🔥",
+            "Капля пота сегодня — это океан гордости завтра. 🌊",
+            "Победи свою лень, и ты победишь всё! 🏆"
+            "Боль временна, триумф вечен. Выложись сегодня на полную! ⚡️",
+            "Твой единственный соперник — это ты вчерашний. Стань лучше! 🥇",
+            "Либо ты управляешь своим днем, либо день управляет тобой. Решай! 😤",
+            "Успех начинается за чертой твоего комфорта. Выходи и делай! 🚪",
+            "Тебе не нужно быть великим, чтобы начать. Тебе нужно начать, чтобы стать великим! ✨",
+            "Оправдания калории не жгут. Просто иди и работай! ⏳",
+            "Мотивация дает толчок, но только привычка заставляет двигаться дальше. ⚙️",
+            "Твой завтрашний успех зависит от того, что ты сделаешь сегодня. 🗓",
+            "Не рассказывай о своих целях — покажи свои результаты! 🤫",
+            "Твое тело может всё, если ты убедишь свой разум. 🧠",
+            "Прогресс — это не прямая линия. Главное — не останавливаться! 📈",
+            "Слабость — это просто выбор. Выбери быть сильным! 🔥",
+            "Сделай сегодня то, за что завтра скажешь себе 'спасибо'. 🙏",
+            "Твое здоровье — это инвестиция, а не расход. Вкладывай в себя! 💎",
+            "Через месяц ты поблагодаришь себя за то, что не сдался сегодня. 🦾"
         ]
-        
-        text = random.choice(motivations)
 
-        count = 0
+        manager = AIManager()
+
         for user in users:
             try:
-                msg = f"☀️ <b>Доброе утро!</b>\n\n{text}"
-                await bot.send_message(user.telegram_id, msg, parse_mode="HTML")
-                count += 1
+                sub_level = user.subscription_level or "free"
+                
+                # --- ЛОГИКА ДЛЯ FREE И LITE (Оставляем как было) ---
+                if sub_level in ["free", "lite"]:
+                    text = random.choice(motivations)
+                    await bot.send_message(user.telegram_id, f"🌅 <b>Тренер напоминает:</b>\n\n{text}", parse_mode="HTML")
+                    continue
+                
+                # --- ПОДГОТОВКА БАЗОВЫХ ДАННЫХ ДЛЯ PRO (Тренировки) ---
+                stmt_w = select(WorkoutLog).where(WorkoutLog.user_id == user.telegram_id).order_by(desc(WorkoutLog.date)).limit(1)
+                res_w = await session.execute(stmt_w)
+                last_workout = res_w.scalar_one_or_none()
+                
+                if last_workout:
+                    days_ago = (today - last_workout.date.date()).days
+                    if days_ago == 0:
+                        workout_info = "Тренировался СЕГОДНЯ"
+                    elif days_ago == 1:
+                        workout_info = "Тренировался ВЧЕРА"
+                    else:
+                        workout_info = f"Не тренировался уже {days_ago} дней"
+                else:
+                    workout_info = "Пока не записывал тренировки"
+
+                # --- ЛОГИКА ДЛЯ STANDARD (Учитывает тренировки) ---
+                if sub_level == "standard":
+                    prompt = (
+                        f"Ты фитнес-тренер. У клиента тариф Standard (Цель: {user.goal}). "
+                        f"Его активность: {workout_info}. "
+                        f"Напиши ОЧЕНЬ КОРОТКОЕ (максимум 150 символов) мотивирующее напоминание на сегодня. "
+                        f"Без приветствий, сразу по делу, дружелюбно."
+                    )
+                    ai_text = await manager.get_chat_response([{"role": "user", "content": prompt}], {})
+                    
+                    await bot.send_message(user.telegram_id, f"⚡️ <b>Тренер на связи:</b>\n\n{ai_text}", parse_mode="HTML")
+
+                # --- ЛОГИКА ДЛЯ ULTRA (Учитывает Тренировки + Питание) ---
+                elif sub_level == "ultra":
+                    stmt_n = select(
+                        func.sum(NutritionLog.calories).label("kcal"),
+                        func.sum(NutritionLog.protein).label("p")
+                    ).where(NutritionLog.user_id == user.telegram_id, func.date(NutritionLog.date) == today)
+                    
+                    res_n = await session.execute(stmt_n)
+                    nut_data = res_n.first()
+                    
+                    kcal = int(nut_data.kcal or 0)
+                    protein = int(nut_data.p or 0)
+                    
+                    nut_info = f"Съедено сегодня: {kcal} ккал, {protein}г белка." if kcal > 0 else "Сегодня еще не вел дневник питания."
+
+                    prompt = (
+                        f"Ты элитный фитнес-тренер и нутрициолог. Клиент Ultra (Цель: {user.goal}). "
+                        f"Активность: {workout_info}. {nut_info} "
+                        f"Напиши КОРОТКИЙ (максимум 200 символов) персональный микро-совет или напоминание. "
+                        f"Без приветствий. Обрати внимание на цифры, если они есть."
+                    )
+                    ai_text = await manager.get_chat_response([{"role": "user", "content": prompt}], {})
+                    
+                    await bot.send_message(user.telegram_id, f"👑 <b>Ultra Аналитика:</b>\n\n{ai_text}", parse_mode="HTML")
+
             except Exception as e:
-                logger.warning(f"Failed to send to {user.telegram_id}: {e}")
-        
-        logger.info(f"✅ Sent motivation to {count} users.")
+                logger.error(f"Ошибка ИИ-уведомления для {user.telegram_id}: {e}")
+                # Fallback: Если ИИ отвалился, отправляем обычную мотивацию
+                fallback_text = random.choice(motivations)
+                try:
+                    await bot.send_message(user.telegram_id, f"⚡️ <b>Тренер на связи:</b>\n\n{fallback_text}", parse_mode="HTML")
+                except:
+                    pass
 
 async def reset_daily_limits(session_pool: async_sessionmaker):
     """
@@ -78,7 +146,7 @@ async def reset_daily_limits(session_pool: async_sessionmaker):
     """
     logger.info("🔄 Запуск ежедневного сброса лимитов...")
     msk_tz = pytz.timezone("Europe/Moscow")
-    now = datetime.datetime.now(msk_tz).replace(tzinfo=None) # Убираем tzinfo для совместимости со SQLite
+    now = datetime.datetime.now(msk_tz).replace(tzinfo=None)
 
     async with session_pool() as session:
         try:

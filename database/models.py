@@ -6,6 +6,9 @@ import datetime
 class User(Base):
     __tablename__ = 'users'
 
+    is_agreed = Column(Boolean, default=False) # Принял ли соглашение
+    agreed_at = Column(DateTime, nullable=True) # Когда именно принял
+
     telegram_id = Column(BigInteger, primary_key=True)
     name = Column(String, nullable=True)
     
