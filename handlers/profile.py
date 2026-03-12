@@ -1,6 +1,6 @@
 import html
 import re
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -111,12 +111,14 @@ async def get_full_profile_text(user, session: AsyncSession) -> str:
 def get_profile_keyboard(user):
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="✏️ Редактировать данные", callback_data="open_edit_menu"))
-    
-    if user.subscription_level == "free" or user.subscription_level is None:
-        kb.row(InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy_premium"))
-    
+         
     kb.row(InlineKeyboardButton(text="📖 Дневник весов", callback_data="exercise_diary"))
     kb.row(InlineKeyboardButton(text="🔔 Время уведомлений", callback_data="change_notif_time"))
+    
+    # --- НАША НОВАЯ КНОПКА ---
+    kb.row(InlineKeyboardButton(text="💳 Баланс и Друзья", callback_data="show_balance"))
+    if user.subscription_level == "free" or user.subscription_level is None:
+        kb.row(InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy_premium"))
     kb.row(InlineKeyboardButton(text="🔄 Начать новый цикл", callback_data="confirm_new_cycle"))
     
     return kb.as_markup()
@@ -323,10 +325,6 @@ async def ask_notif_time(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-@router.callback_query(F.data == "buy_premium")
-async def process_buy_premium(callback: CallbackQuery):
-    await callback.answer("💳 Модуль оплаты будет доступен в следующем обновлении!", show_alert=True)
-
 @router.callback_query(F.data.startswith("set_time_"))
 async def save_notif_time(callback: CallbackQuery, session: AsyncSession):
     try:
@@ -394,3 +392,51 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     ])
     
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+# 1. Сначала показываем только баланс
+@router.callback_query(F.data == "show_balance")
+async def show_balance_callback(call: CallbackQuery, session: AsyncSession):
+    user = await UserCRUD.get_user(session, call.from_user.id)
+    
+    # Собираем список кнопок
+    buttons = [
+        [InlineKeyboardButton(text="🔗 Реферальная ссылка", callback_data="show_ref_link")]
+    ]
+    
+    # Если тариф уже платный, добавляем кнопку апгрейда прямо под реф. ссылку
+    if user.subscription_level not in ["free", None]:
+        buttons.append([InlineKeyboardButton(text="💎 Управление подпиской", callback_data="buy_premium")])
+        
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    await call.message.answer(
+        f"💳 <b>Ваш баланс:</b> {user.referral_balance} руб.\n\n"
+        f"<i>Средства с баланса можно использовать для оплаты подписки.</i>",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+# 2. Выдаем ссылку по нажатию на новую кнопку
+@router.callback_query(F.data == "show_ref_link")
+async def show_ref_link_callback(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    user = await UserCRUD.get_user(session, call.from_user.id)
+    bot_info = await bot.get_me()
+    
+    ref_link = f"https://t.me/{bot_info.username}?start={user.telegram_id}"
+    
+    text = (
+        f"🎁 <b>Партнерская программа</b>\n\n"
+        f"Приглашайте друзей и зарабатывайте на оплату подписки!\n\n"
+        f"🔗 <b>Ваша личная ссылка:</b>\n"
+        f"<code>{ref_link}</code>\n"
+        f"<i>(нажмите на ссылку, чтобы скопировать)</i>\n\n"
+        f"<b>Что получает друг:</b>\n"
+        f"➕ 5 генераций тренировок\n"
+        f"➕ 10 вопросов AI-тренеру\n\n"
+        f"<b>Что получаете вы:</b>\n"
+        f"🔥 <b>15%</b> от любой оплаты друга моментально зачисляются на ваш баланс!" # <--- И ЗДЕСЬ 15%
+    )
+    
+    await call.message.answer(text, parse_mode="HTML")
+    await call.answer()   

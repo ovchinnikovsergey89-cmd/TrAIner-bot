@@ -1,5 +1,3 @@
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 import time
 import datetime
 import logging
@@ -41,6 +39,7 @@ def is_admin(user_id: int) -> bool:
 # 1. ГЛАВНОЕ МЕНЮ АДМИНА
 # ==========================================
 @router.message(Command("admin"))
+
 async def admin_panel_start(message: Message):
     if not is_admin(message.from_user.id): return
 
@@ -248,11 +247,12 @@ async def show_user_card(message: Message, state: FSMContext, session: AsyncSess
             f"🎯 Цель: {user.goal}"
         )
 
-        # Кнопки управления
+        # Добавляем кнопку удаления в клавиатуру
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💎 Сделать ULTRA", callback_data=f"set_level_ultra_{target_id}")],
             [InlineKeyboardButton(text="🥈 Сделать STANDARD", callback_data=f"set_level_standard_{target_id}")],
             [InlineKeyboardButton(text="➕ Добавить +10 лимитов", callback_data=f"add_limits_{target_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"admin_delete_user_{target_id}")], # НОВАЯ КНОПКА
             [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_users")]
         ])
 
@@ -488,3 +488,101 @@ async def delete_promo_confirm(callback: CallbackQuery, session: AsyncSession):
     await UserCRUD.delete_promo(session, code)
     await callback.answer(f"Удалено: {code}")
     await admin_promo_menu(callback, session)
+
+@router.message(Command("del"))
+async def admin_delete_user(message: Message, session: AsyncSession):
+    # Проверка на админа (у тебя в боте она уже должна быть реализована)
+    # if message.from_user.id not in ADMIN_IDS: return 
+
+    # Достаем ID из текста команды: /del 123456789
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("⚠️ Введи ID: <code>/del 123456789</code>", parse_mode="HTML")
+        return
+
+    try:
+        target_id = int(args[1])
+        success = await UserCRUD.delete_user(session, target_id)
+        
+        if success:
+            await message.answer(f"✅ Пользователь <code>{target_id}</code> полностью удален из базы.", parse_mode="HTML")
+        else:
+            await message.answer("❌ Пользователь с таким ID не найден.")
+            
+    except ValueError:
+        await message.answer("⚠️ ID должен быть числом.")    
+
+# --- 1. ПРЕДУПРЕЖДЕНИЕ И ЗАПРОС ПОДТВЕРЖДЕНИЯ ---
+@router.callback_query(F.data.startswith("admin_delete_user_"))
+async def process_admin_delete_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): 
+        await callback.answer("У вас нет прав!", show_alert=True)
+        return
+    
+    try:
+        data_parts = callback.data.split("_")
+        target_id = int(data_parts[-1]) 
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка данных", show_alert=True)
+        return
+    
+    # Создаем клавиатуру с подтверждением
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_{target_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_delete_{target_id}")
+        ]
+    ])
+    
+    # Меняем сообщение на вопрос
+    await callback.message.edit_text(
+        f"⚠️ <b>ВНИМАНИЕ!</b>\n\nВы точно хотите <b>безвозвратно</b> удалить пользователя <code>{target_id}</code> и всю его историю?",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+# --- 2. ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ (Реальное удаление) ---
+@router.callback_query(F.data.startswith("confirm_delete_"))
+async def confirm_admin_delete_user(callback: CallbackQuery, session: AsyncSession):
+    if not is_admin(callback.from_user.id): 
+        await callback.answer("У вас нет прав!", show_alert=True)
+        return
+    
+    try:
+        target_id = int(callback.data.split("_")[-1]) 
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка данных", show_alert=True)
+        return
+    
+    # Реальное удаление из базы
+    success = await UserCRUD.delete_user(session, target_id)
+    
+    if success:
+        await callback.answer("💥 Пользователь удален", show_alert=True)
+        await callback.message.edit_text(
+            f"✅ Пользователь <code>{target_id}</code> полностью удален из базы.", 
+            parse_mode="HTML"
+        )
+    else:
+        await callback.answer("❌ Ошибка удаления", show_alert=True)
+        await callback.message.edit_text("❌ Пользователь с таким ID не найден или уже удален.")
+
+# --- 3. ОТМЕНА УДАЛЕНИЯ ---
+@router.callback_query(F.data.startswith("cancel_delete_"))
+async def cancel_admin_delete_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): 
+        await callback.answer("У вас нет прав!", show_alert=True)
+        return
+        
+    try:
+        target_id = int(callback.data.split("_")[-1]) 
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка данных", show_alert=True)
+        return
+
+    await callback.answer("Действие отменено")
+    await callback.message.edit_text(
+        f"🛡 Удаление пользователя <code>{target_id}</code> отменено.", 
+        parse_mode="HTML"
+    )        

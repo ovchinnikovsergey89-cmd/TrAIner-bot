@@ -37,7 +37,7 @@ async def start_chat_logic(message: Message, state: FSMContext):
 
 @router.message(F.text == "💬 Чат с тренером")
 async def start_chat_text(message: Message, state: FSMContext):
-    await state.set_state(AIChatState.chatting) # <--- 🔴 ДОБАВЛЯЕМ ЭТУ СТРОЧКУ
+    await state.set_state(AIChatState.chatting)
     await start_chat_logic(message, state)
 
 # --- ОБРАБОТКА КОМАНДЫ /RESET ---
@@ -47,30 +47,50 @@ async def handle_reset_command(message: Message, state: FSMContext):
     await message.answer("🔄 История диалога очищена!")
 
 # ==========================================
-# ОБРАБОТКА ГОЛОСОВЫХ В ЧАТЕ (ТОЛЬКО PREMIUM)
+# ОБРАБОТКА ГОЛОСОВЫХ В ЧАТЕ (С ПРОВЕРКОЙ ЛИМИТОВ)
 # ==========================================
 @router.message(AIChatState.chatting, F.voice)
 async def process_voice_message(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
     user = await UserCRUD.get_user(session, message.from_user.id)
     is_admin_user = is_admin(message.from_user.id)
     
-    # 1. ПРОВЕРКА НА PRO ТАРИФ (Standard и Ultra)
-    user_sub = user.subscription_level or "free"
-    if not is_admin_user and user_sub in ["free", "lite"]:
-        premium_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]
+    # 1. ПРОВЕРКА ЛИМИТОВ ВОПРОСОВ
+    if not is_admin_user and (user.chat_limit or 0) <= 0:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Апгрейд / Подписка", callback_data="buy_premium")]
         ])
         await message.answer(
-            "🎙 <b>Голосовой помощник — это функция тарифов Standard и Ultra!</b>\n\nОформи подписку, чтобы общаться голосом.",
-            reply_markup=premium_kb,
-            parse_mode="HTML"
+            "❌ <b>Лимит вопросов исчерпан!</b>\n\n"
+            "Вы можете оформить подписку или приобрести разовый <b>Апгрейд</b> (+10 вопросов), чтобы продолжить общение.",
+            reply_markup=kb, parse_mode="HTML"
         )
         return
 
-    # 2. ПРОВЕРКА ЛИМИТОВ
-    if not is_admin_user and (user.chat_limit or 0) <= 0:
-        await message.answer("🚀 Лимит сообщений на сегодня исчерпан!")
-        return
+    # 2. ПРОВЕРКА НА PRO ТАРИФ И ДЛИНУ АУДИО
+    user_sub = user.subscription_level or "free"
+    
+    if not is_admin_user:
+        # Если тариф Free или Lite - блокируем голос полностью
+        if user_sub in ["free", "lite"]:
+            premium_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]
+            ])
+            await message.answer(
+                "🎙 <b>Голосовой ввод доступен с тарифа Standard!</b>\n\n"
+                "Оформи подписку, чтобы диктовать вопросы, а не печатать руками.",
+                reply_markup=premium_kb,
+                parse_mode="HTML"
+            )
+            return
+        
+        # Проверка длины голосового (message.voice.duration выдает длину в секундах)
+        duration = message.voice.duration
+        if user_sub == "standard" and duration > 40:
+            await message.answer("⚠️ На тарифе <b>Standard</b> максимальная длина голосового — 40 секунд.\nПожалуйста, запишите вопрос короче или напишите текстом.", parse_mode="HTML")
+            return
+        if user_sub == "ultra" and duration > 120:
+            await message.answer("⚠️ Максимальная длина голосового — 2 минуты. Пожалуйста, запишите вопрос покороче.", parse_mode="HTML")
+            return
 
     status_msg = await message.answer("🎧 <i>Слушаю...</i>", parse_mode="HTML")
     
@@ -82,17 +102,16 @@ async def process_voice_message(message: Message, session: AsyncSession, state: 
 
     try:
         manager = AIManager()
-        # 4. ПЕРЕВОДИМ ГОЛОС В ТЕКСТ (через Groq в AIManager)
+        # 4. ПЕРЕВОДИМ ГОЛОС В ТЕКСТ
         recognized_text = await manager.transcribe_voice(temp_filename)
 
         if not recognized_text:
             await status_msg.edit_text("❌ Не удалось разобрать слова. Попробуй сказать четче.")
             return
 
-        # 5. СПИСЫВАЕМ ЛИМИТ
+        # 5. СПИСЫВАЕМ ЛИМИТ ЧЕРЕЗ НОВЫЙ МЕТОД
         if not is_admin_user:
-            user.chat_limit -= 1
-            await session.commit()
+            await UserCRUD.decrement_chat_limit(session, user.telegram_id)
 
         await status_msg.edit_text(f"🎤 Вы сказали: <i>{recognized_text}</i>\n\n⏳ Тренер думает...", parse_mode="HTML")
 
@@ -142,9 +161,16 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
         user = await UserCRUD.get_user(session, message.from_user.id)
         is_admin_user = is_admin(message.from_user.id)
 
-        # Проверка лимитов
+        # Проверка лимитов для текстового вопроса
         if not is_admin_user and (user.chat_limit or 0) <= 0:
-            await message.answer("🚀 Попытки закончились!")
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚀 Апгрейд / Подписка", callback_data="buy_premium")]
+            ])
+            await message.answer(
+                "❌ <b>Лимит вопросов исчерпан!</b>\n\n"
+                "Вы можете оформить подписку или приобрести разовый <b>Апгрейд</b> (+10 вопросов), чтобы продолжить общение с тренером.",
+                reply_markup=kb, parse_mode="HTML"
+            )
             return
 
         await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
@@ -160,10 +186,9 @@ async def process_chat_message(message: Message, state: FSMContext, session: Asy
         
         ai_answer = await manager.get_chat_response(current_history, u_ctx)
 
-        # Списание лимита 
+        # СПИСАНИЕ ЛИМИТА ЧЕРЕЗ НОВЫЙ МЕТОД
         if not is_admin_user:
-            user.chat_limit -= 1
-            await session.commit()
+            await UserCRUD.decrement_chat_limit(session, user.telegram_id)
 
         # Сохраняем историю
         current_history.append({"role": "assistant", "content": ai_answer})

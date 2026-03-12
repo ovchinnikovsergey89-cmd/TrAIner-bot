@@ -20,7 +20,7 @@ from database.crud import UserCRUD
 from services.ai_manager import AIManager
 from states.workout_states import WorkoutPagination, WorkoutRequest
 from keyboards.pagination import get_pagination_kb
-from database.models import WorkoutLog, ExerciseLog
+from database.models import WorkoutLog, ExerciseLog, User
 from datetime import timedelta
 
 router = Router()
@@ -267,12 +267,14 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
         await message.answer(f"⏳ <b>Подождите {wait_time if wait_time > 0 else 1} мин.</b>\nНейросети нужно время.")
         return
 
+    is_admin_user = is_admin(message.from_user.id)
+
     # --- 2. ПРОВЕРКА ЛИМИТА ---
-    if user.workout_limit <= 0:
+    if not is_admin_user and (user.workout_limit or 0) <= 0:
         await message.answer(
-            "🚀 <b>Упс! Попытки закончились</b>\n\n"
-            "Вы использовали все бесплатные генерации. Чтобы составить новый план, получите Premium.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Получить Premium", callback_data="buy_premium")]]),
+            "🚀 <b>Лимит генераций исчерпан!</b>\n\n"
+            "Вы можете оформить подписку или приобрести разовый <b>Апгрейд</b> (+5 генераций), чтобы составить новый план.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Апгрейд / Подписка", callback_data="buy_premium")]]),
             parse_mode="HTML"
         )
         return
@@ -321,7 +323,9 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
         # --- 3. СОХРАНЕНИЕ В БД И АРХИВ ---
         pages_json = json.dumps(cleaned_pages, ensure_ascii=False)
         user.current_workout_program = pages_json
-        user.workout_limit -= 1
+        # Безопасное списание лимита
+        if not is_admin_user:
+            await UserCRUD.decrement_workout_limit(session, user.telegram_id)
         
         # --- НОВОЕ: СОХРАНЯЕМ В АРХИВ ---
         await UserCRUD.save_program_history(session, user.telegram_id, 'workout', pages_json)
@@ -399,8 +403,9 @@ async def process_quick_workout_wishes(message: Message, session: AsyncSession, 
         
         # Для разовой тренировки не используем пагинацию, просто отправляем текст
         # И списываем 1 лимит
-        user.workout_limit -= 1
-        await session.commit()
+        # Безопасное списание лимита генераций
+        if not is_admin(message.from_user.id):
+            await UserCRUD.decrement_workout_limit(session, user.telegram_id)
         
         await loading_msg.delete()
         
@@ -485,17 +490,16 @@ async def noop_btn(callback: CallbackQuery):
     await callback.answer()
 
 # ==========================================
-# 5. ОТМЕТКА ВЫПОЛНЕНИЯ (С ЗАЩИТОЙ)
-# ==========================================
+# --- 5. ОТМЕТКА ВЫПОЛНЕНИЯ (СЧЕТЧИК +1) ---
 @router.callback_query(F.data == "workout_done")
 async def process_workout_done(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     user_id = callback.from_user.id
     now = datetime.datetime.now()
 
-    # 1. ПРОВЕРКА 12 ЧАСОВ: Ищем последнюю запись именно О ЗАВЕРШЕНИИ тренировки
+    # 1. ЗАЩИТА 12 ЧАСОВ (чтобы не накручивали счетчик)
     stmt = select(WorkoutLog).where(
         WorkoutLog.user_id == user_id,
-        WorkoutLog.workout_type.like("Тренировка День%") # Ищем только отметки о выполнении дня
+        WorkoutLog.workout_type.like("Тренировка День%")
     ).order_by(WorkoutLog.date.desc()).limit(1)
     
     result = await session.execute(stmt)
@@ -505,98 +509,85 @@ async def process_workout_done(callback: CallbackQuery, session: AsyncSession, s
         time_diff = now - last_workout.date
         if time_diff < timedelta(hours=12):
             hours_left = 12 - (time_diff.total_seconds() // 3600)
-            await callback.answer(f"⚠️ Отметить тренировку можно раз в 12 часов. Подожди еще {int(hours_left)} ч.", show_alert=True)
+            await callback.answer(f"⚠️ Рано! Подожди еще {int(hours_left)} ч.", show_alert=True)
             return
-    # -------------------------------------------------------
 
-    # 2. Логика сохранения завершенной тренировки
+    # 2. ПРИБАВЛЯЕМ +1 В ПРОФИЛЬ
+    result_user = await session.execute(select(User).where(User.telegram_id == user_id))
+    user = result_user.scalar_one_or_none()
+    
+    if user:
+        user.completed_workouts += 1 # Считаем количество выполненных
+
+    # 3. ЗАПИСЫВАЕМ ЛОГ И СОХРАНЯЕМ
     data = await state.get_data()
     current_page = data.get("current_page", 0)
     pages = data.get("workout_pages", [])
     completed_days = data.get("completed_days", [])
-
-    if current_page not in completed_days:
-        completed_days.append(current_page)
-        await state.update_data(completed_days=completed_days)
-
-    # 3. Записываем в БД факт выполнения всего дня
-    new_log = WorkoutLog(
-        user_id=user_id,
-        workout_type=f"Тренировка День {current_page + 1}",
-        date=now
-    )
+    
+    workout_label = f"Тренировка День {current_page + 1}"
+    new_log = WorkoutLog(user_id=user_id, workout_type=workout_label, date=now)
     session.add(new_log)
-    await session.commit()
     
-    # Сохраняем в память
+    await session.commit()
+
+    # 4. ОБНОВЛЯЕМ ПАМЯТЬ И ИНТЕРФЕЙС
     if current_page not in completed_days:
         completed_days.append(current_page)
         await state.update_data(completed_days=completed_days)
 
-    await callback.answer("💪 Мощно! Тренировка засчитана!", show_alert=True)
+    await callback.answer(f"🔥 Засчитано! Всего тренировок: {user.completed_workouts}", show_alert=True)
     
-    # 4. Обновляем сообщение (кнопка меняется на "Отменить выполнение")
-    if pages:
-        await show_workout_pages(callback.message, state, pages, from_db=True, completed_days_direct=completed_days)
-    
-    # Обновляем сообщение (ставим кнопку "Отменить")
+    # Смена кнопки на "Отменить"
     base_kb = get_pagination_kb(current_page, len(pages), page_type="workout")
     rows = [[InlineKeyboardButton(text="🔄 Отменить выполнение", callback_data=f"workout_undo_{current_page}")]]
-    
     if base_kb and base_kb.inline_keyboard:
         rows.extend(base_kb.inline_keyboard)
-        
-    final_keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     
-    try:
-        page_text = pages[current_page] + "\n\n🌟 <b>Эта тренировка выполнена!</b>"
-        await callback.message.edit_text(text=page_text, reply_markup=final_keyboard, parse_mode=ParseMode.HTML)
-    except TelegramBadRequest:
-        await callback.answer() # Игнорируем, если текст не изменился
+    final_keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    page_text = pages[current_page] + "\n\n🌟 <b>Эта тренировка выполнена!</b>"
+    await callback.message.edit_text(text=page_text, reply_markup=final_keyboard, parse_mode=ParseMode.HTML)
 
+
+# --- 6. ОТМЕНА ВЫПОЛНЕНИЯ (СЧЕТЧИК -1) ---
 @router.callback_query(F.data.startswith("workout_undo_"))
 async def process_workout_undo(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     target_page = int(callback.data.split("_")[-1])
-    data = await state.get_data()
-    completed_days = data.get("completed_days", [])
-    pages = data.get("workout_pages", [])
+    user_id = callback.from_user.id
+    
+    # 1. ВЫЧИТАЕМ -1 ИЗ ПРОФИЛЯ
+    result_user = await session.execute(select(User).where(User.telegram_id == user_id))
+    user = result_user.scalar_one_or_none()
+    if user and user.completed_workouts > 0:
+        user.completed_workouts -= 1
 
-    # Удаляем из БД
+    # 2. УДАЛЯЕМ ЛОГ ИЗ БАЗЫ
     stmt = delete(WorkoutLog).where(
-        WorkoutLog.user_id == callback.from_user.id,
-        WorkoutLog.workout_type == f"День {target_page + 1}"
+        WorkoutLog.user_id == user_id,
+        WorkoutLog.workout_type == f"Тренировка День {target_page + 1}"
     )
     await session.execute(stmt)
     await session.commit()
 
-    # Удаляем из памяти
+    # 3. УДАЛЯЕМ ИЗ ПАМЯТИ
+    data = await state.get_data()
+    completed_days = data.get("completed_days", [])
+    pages = data.get("workout_pages", [])
+    
     if target_page in completed_days:
         completed_days.remove(target_page)
         await state.update_data(completed_days=completed_days)
 
-    await callback.answer("Выполнение отменено", show_alert=True)
+    await callback.answer("🔄 Отменено. Счетчик обновлен.", show_alert=True)
 
-    # Возвращаем кнопку "Выполнено"
+    # 4. ВОЗВРАЩАЕМ КНОПКУ "ВЫПОЛНЕНО"
     base_kb = get_pagination_kb(target_page, len(pages), page_type="workout")
-    page_text = pages[target_page]
-    first_line = page_text.split('\n')[0].upper()
-    rest_keywords = ["ВОССТАНОВЛЕНИЕ", "ОТДЫХ", "ВЫХОДНОЙ"]
-    is_rest_day = any(word in first_line for word in rest_keywords)
-    is_advice_page = target_page == len(pages) - 1
-
-    rows = []
-    if not is_rest_day and not is_advice_page:
-        rows.append([InlineKeyboardButton(text="✅ Тренировка выполнена", callback_data="workout_done")])
-            
+    rows = [[InlineKeyboardButton(text="✅ Тренировка выполнена", callback_data="workout_done")]]
     if base_kb and base_kb.inline_keyboard:
         rows.extend(base_kb.inline_keyboard)
-            
+    
     final_keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
-
-    try:
-        await callback.message.edit_text(text=page_text, reply_markup=final_keyboard, parse_mode=ParseMode.HTML)
-    except TelegramBadRequest:
-        await callback.answer()
+    await callback.message.edit_text(text=pages[target_page], reply_markup=final_keyboard, parse_mode=ParseMode.HTML)
 
 # ==========================================
 # 6. ПРОЧИЕ ХЕНДЛЕРЫ
@@ -692,17 +683,44 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
     
     # 1. Проверка лимитов
     user = await UserCRUD.get_user(session, message.from_user.id)
-    if not user or user.workout_limit <= 0:
-        await message.answer("❌ <b>Лимит генераций исчерпан.</b>", parse_mode="HTML")
+    is_admin_user = is_admin(message.from_user.id)
+
+    # ==========================================
+    # 1. ПРОВЕРКА ЛИМИТОВ (ДЛЯ ДНЕВНИКА - ЭТО ЧАТ ЛИМИТ)
+    # ==========================================
+    if not is_admin_user and (user.chat_limit or 0) <= 0:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Апгрейд / Подписка", callback_data="buy_premium")]])
+        await message.answer("❌ <b>Лимит вопросов исчерпан!</b>\n\nОформите подписку или приобретите <b>Апгрейд</b>, чтобы продолжить вести дневник.", reply_markup=kb, parse_mode="HTML")
         return
+
+    # ==========================================
+    # 2. БЛОКИРОВКА ГОЛОСОВЫХ ПО ТАРИФАМ
+    # ==========================================
+    if message.voice and not is_admin_user:
+        user_sub = user.subscription_level or "free"
+        
+        if user_sub in ["free", "lite"]:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]])
+            await message.answer("🎙 <b>Голосовой ввод доступен с тарифа Standard!</b>\n\nОформи подписку, чтобы диктовать подходы.", reply_markup=kb, parse_mode="HTML")
+            return
+            
+        duration = message.voice.duration
+        if user_sub == "standard" and duration > 40:
+            await message.answer("⚠️ На тарифе <b>Standard</b> максимальная длина голосового — 40 секунд.")
+            return
+        if user_sub == "ultra" and duration > 120:
+            await message.answer("⚠️ Максимальная длина голосового — 2 минуты.")
+            return
 
     status_msg = await message.answer("⏳ <i>Обрабатываю данные...</i>", parse_mode="HTML")
     input_text = ""
 
     # ==========================================
-    # 2. ЕСЛИ ЭТО ГОЛОСОВОЕ СООБЩЕНИЕ
+    # 3. ЕСЛИ ЭТО ГОЛОСОВОЕ СООБЩЕНИЕ (Загрузка)
     # ==========================================
     if message.voice:
+        file_id = message.voice.file_id
+        # ... (и дальше твой старый код: file = await bot.get_file(file_id) и т.д.)
         # 🔥 НОВОЕ: Защита от слишком длинных аудио (больше 60 секунд)
         if message.voice.duration > 60:
             await message.answer("⚠️ Голосовое слишком длинное! Пожалуйста, уложись в 1 минуту.")
@@ -815,10 +833,9 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
         # Фиксируем изменения в базе
         await session.commit()
         
-        # Списываем лимит только при успешной записи
+        # Списываем лимит только при успешной записи (БЕЗОПАСНО)
         if saved_exercises and not is_admin(message.from_user.id):
-            user.chat_limit -= 1
-            await session.commit()
+            await UserCRUD.decrement_chat_limit(session, message.from_user.id)
 
         # Формируем ответ пользователю
         if saved_exercises:

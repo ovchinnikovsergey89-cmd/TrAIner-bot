@@ -8,7 +8,7 @@ from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatAction
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
 from aiogram.exceptions import TelegramBadRequest
@@ -30,18 +30,13 @@ class RecipeState(StatesGroup):
     waiting_for_dish = State()
     waiting_for_nutrition_data = State()
 
-# 🔥 НОВАЯ ФУНКЦИЯ: Аккуратно склеивает листалку и кнопки дневника
+# 🔥 ФУНКЦИЯ: Аккуратно склеивает листалку и кнопки дневника
 def get_nutrition_kb_with_diary(current_page: int, total_pages: int) -> InlineKeyboardMarkup:
-    # 1. Получаем базовую клавиатуру (стрелочки и прочее)
     base_kb = get_pagination_kb(current_page, total_pages, page_type="nutrition")
-    
-    # 2. Наши 2 новые кнопки
     extra_buttons = [
         [InlineKeyboardButton(text="📝 Записать прием пищи", callback_data="log_nutrition_press")],
         [InlineKeyboardButton(text="📊 Сводка КБЖУ за день", callback_data="show_today_nutrition")]
     ]
-    
-    # 3. Приклеиваем их на самый верх
     return InlineKeyboardMarkup(inline_keyboard=extra_buttons + base_kb.inline_keyboard)
 
 def clean_text(text: str) -> str:
@@ -65,7 +60,7 @@ async def show_pages(message: Message, state: FSMContext, pages: list, from_db: 
     try:
         await message.answer(
             text=prefix + pages[0],
-            reply_markup=get_nutrition_kb_with_diary(0, len(pages)), # <-- ИСПОЛЬЗУЕМ ХЕЛПЕР
+            reply_markup=get_nutrition_kb_with_diary(0, len(pages)),
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
@@ -74,7 +69,7 @@ async def show_pages(message: Message, state: FSMContext, pages: list, from_db: 
 # --- ПРОСМОТР ---
 @router.message(F.text == "🍽 Мое меню")
 async def show_my_nutrition(message: Message, session: AsyncSession, state: FSMContext):
-    user = await UserCRUD.get_user(session, message.chat.id) # <--- ВОТ И ВСЯ МАГИЯ!
+    user = await UserCRUD.get_user(session, message.chat.id)
     if not user:
         await message.answer("Сначала заполни профиль! (/start)")
         return
@@ -87,7 +82,6 @@ async def show_my_nutrition(message: Message, session: AsyncSession, state: FSMC
             pages = [user.current_nutrition_program]
             await show_pages(message, state, pages, from_db=True)
     else:
-        # Показываем кнопки дневника даже если меню еще не сгенерировано!
         empty_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📝 Записать прием пищи", callback_data="log_nutrition_press")],
             [InlineKeyboardButton(text="📊 Сводка КБЖУ за день", callback_data="show_today_nutrition")]
@@ -113,17 +107,14 @@ async def request_ai_nutrition(message: Message, session: AsyncSession, state: F
         await message.answer("🍎 <b>У тебя уже есть план питания.</b>\n\n"
             "Хочешь составить абсолютно новый рацион?", reply_markup=confirm_kb)
     else:
-        # Если меню вообще нет — сразу к пожеланиям
         await state.update_data(current_nutrition_program=None)
         await ask_nutrition_wishes(message, state)
 
 # ==========================================
 # 2. ОБРАБОТЧИК: СОЗДАНИЕ С НУЛЯ
-# Срабатывает при нажатии "✅ Составить НОВОЕ меню"
 # ==========================================
 @router.callback_query(F.data == "confirm_new_nutrition")
 async def confirm_new_nutrition_handler(callback: CallbackQuery, state: FSMContext):
-    # Очищаем старый план в state, чтобы ИИ выдал НОВОЕ, а не правил старое
     await state.update_data(current_nutrition_program=None)
     await state.set_state(WorkoutRequest.waiting_for_nutrition_wishes)
     
@@ -133,32 +124,39 @@ async def confirm_new_nutrition_handler(callback: CallbackQuery, state: FSMConte
     except: pass
 
 # ==========================================
-# 3. ОБРАБОТЧИК: РЕДАКТИРОВАНИЕ ТЕКУЩЕГО
-# Срабатывает при нажатии "✏️ Изменить текущее" или "Новый рацион" внутри меню
+# 3. ОБРАБОТЧИК: РЕДАКТИРОВАНИЕ ТЕКУЩЕГО (ТОЛЬКО ДЛЯ PRO)
 # ==========================================
 @router.callback_query(F.data == "regen_nutrition")
 @router.callback_query(F.data == "refresh_ai_nutrition")
 async def edit_existing_nutrition_handler(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, callback.from_user.id)
-    
-    # 1. Сохраняем текущий план в state (для ИИ-редактора)
+    is_admin_user = is_admin(callback.from_user.id)
+    user_sub = user.subscription_level or "free"
+
+    # Блокировка редактирования для Free и Lite
+    if not is_admin_user and user_sub in ["free", "lite"]:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]
+        ])
+        await callback.message.answer(
+            "🥗 <b>Точечная коррекция меню доступна с тарифа Standard!</b>\n\n"
+            "На вашем тарифе доступно только базовое составление меню. "
+            "Оформите подписку, чтобы ИИ-тренер мог заменять блюда по вашим пожеланиям.",
+            reply_markup=kb, parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
     await state.update_data(current_nutrition_program=user.current_nutrition_program)
-    
-    # 2. Устанавливаем состояние ожидания правок
     await state.set_state(WorkoutRequest.waiting_for_nutrition_wishes) 
     
-    # 3. Присылаем вопрос НОВЫМ сообщением (не удаляя старое с меню!)
     await callback.message.answer(
         "📝 <b>Что именно изменить в этом меню?</b>\n\n"
-        "План выше перед тобой. Напиши, что заменить или добавить (например: <i>'убери рыбу'</i> или <i>'Замени варианты перекуса'</i> ), "
+        "Напиши, что заменить или добавить (например: <i>'убери рыбу'</i> или <i>'Замени варианты перекуса'</i> ), "
         "или просто нажми /cancel для отмены.",
         parse_mode="HTML"
     )
-    
-    # 4. Гасим часики на кнопке
     await callback.answer()
-    
-    # СТРОКУ С DELETE МЫ УБРАЛИ, ЧТОБЫ МЕНЮ НЕ ИСЧЕЗАЛО!
 
 @router.callback_query(F.data == "log_nutrition_press")
 async def start_log_nutrition(callback: CallbackQuery, state: FSMContext):
@@ -166,7 +164,6 @@ async def start_log_nutrition(callback: CallbackQuery, state: FSMContext):
         keyboard=[[KeyboardButton(text="🔙 Завершить запись")]],
         resize_keyboard=True
     )
-    
     await callback.message.answer(
         "🍎 <b>Дневник питания</b>\n\n"
         "Продиктуй или напиши, что ты съел. Я сам рассчитаю примерные калории.\n"
@@ -190,26 +187,30 @@ async def ask_nutrition_wishes(message: Message, state: FSMContext):
     )
     await state.set_state(WorkoutRequest.waiting_for_nutrition_wishes)
 
+# ==========================================
+# ГЕНЕРАЦИЯ МЕНЮ (С ПРОВЕРКОЙ ЛИМИТОВ)
+# ==========================================
 async def generate_nutrition_process(message: Message, session: AsyncSession, user, state: FSMContext, wishes: str, status_msg: Message = None):
-    # Используем другое имя переменной (user_state_data), чтобы не перезаписать наш словарь для ИИ
     user_state_data = await state.get_data()
     last_gen_time = user_state_data.get("last_nutrition_gen_time", 0)
     current_time = time.time()
+    is_admin_user = is_admin(message.from_user.id)
 
-    if current_time - last_gen_time < 300 and not is_admin(message.from_user.id):
+    if current_time - last_gen_time < 300 and not is_admin_user:
         wait_time = int((300 - (current_time - last_gen_time)) / 60)
         await message.answer(f"⏳ <b>Подождите {wait_time if wait_time > 0 else 1} мин.</b>\nНейросети нужно время.")
         return
 
-    if user.workout_limit <= 0:
+    # 1. ПРОВЕРКА ЛИМИТОВ ГЕНЕРАЦИИ
+    if not is_admin_user and (user.workout_limit or 0) <= 0:
         if status_msg: 
             try: await status_msg.delete()
             except: pass
         await message.answer(
-            "🚀 <b>Упс! Попытки закончились</b>\n\n"
-            "Вы использовали все бесплатные генерации.",
+            "🚀 <b>Лимит генераций исчерпан!</b>\n\n"
+            "Вы можете оформить подписку или приобрести разовый <b>Апгрейд</b> (+5 генераций), чтобы составить новое меню.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💎 Получить Premium", callback_data="buy_premium")]
+                [InlineKeyboardButton(text="💎 Апгрейд / Подписка", callback_data="buy_premium")]
             ]),
             parse_mode="HTML"
         )
@@ -218,30 +219,24 @@ async def generate_nutrition_process(message: Message, session: AsyncSession, us
     await state.update_data(last_nutrition_gen_time=current_time)
 
     try:
-        # --- НОВОЕ: ОПРЕДЕЛЯЕМ ГЛУБИНУ ИСТОРИИ ПО ТАРИФУ ---
         history_limit = 0
         sub_level = user.subscription_level.lower() if user.subscription_level else "free"
         
-        if sub_level == "ultra":
-            history_limit = 5
-        elif sub_level in ["standart", "standard"]:
-            history_limit = 3
-        elif sub_level == "lite":
-            history_limit = 1
+        if sub_level == "ultra": history_limit = 5
+        elif sub_level in ["standart", "standard"]: history_limit = 3
+        elif sub_level == "lite": history_limit = 1
             
-        # --- НОВОЕ: ДОСТАЕМ ИСТОРИЮ ИЗ АРХИВА ---
         past_programs = []
         if history_limit > 0:
             past_programs = await UserCRUD.get_program_history(session, user.telegram_id, 'nutrition', history_limit)
         
-        # Склеиваем историю меню
         history_text = "\n\n=== ПРОШЛОЕ МЕНЮ ===\n\n".join(past_programs) if past_programs else ""
 
         user_data = {
             "goal": user.goal, "gender": user.gender, "weight": user.weight, 
             "age": user.age, "activity_level": user.activity_level, "height": user.height,
             "name": user.name, "wishes": wishes, "current_nutrition_program": user.current_nutrition_program,
-            "past_programs": history_text # <-- Передаем историю ИИ
+            "past_programs": history_text
         }
         
         ai_service = AIManager()
@@ -254,27 +249,24 @@ async def generate_nutrition_process(message: Message, session: AsyncSession, us
             await message.answer("❌ Сервер перегружен, попробуй позже.")
             return
 
-        import json
         pages_json = json.dumps(raw_pages, ensure_ascii=False)
         user.current_nutrition_program = pages_json
-        user.workout_limit -= 1
-        
-        # --- НОВОЕ: СОХРАНЯЕМ В АРХИВ ---
-        await UserCRUD.save_program_history(session, user.telegram_id, 'nutrition', pages_json)
-
         await session.commit()
+        
+        # 2. БЕЗОПАСНОЕ СПИСАНИЕ ЛИМИТА
+        if not is_admin_user:
+            await UserCRUD.decrement_workout_limit(session, user.telegram_id)
+
+        await UserCRUD.save_program_history(session, user.telegram_id, 'nutrition', pages_json)
 
         if status_msg:
             try: await status_msg.delete()
             except: pass
 
-        # Сохраняем страницы в стейт, чтобы пагинация работала без ошибок!
         await state.update_data(nutrition_pages=raw_pages, current_page=0)
-
         await message.answer(
-            raw_pages[0],
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_nutrition_kb_with_diary(0, len(raw_pages)) # <-- ИСПОЛЬЗУЕМ ХЕЛПЕР
+            raw_pages[0], parse_mode=ParseMode.HTML,
+            reply_markup=get_nutrition_kb_with_diary(0, len(raw_pages))
         )
 
     except Exception as e:
@@ -286,26 +278,22 @@ async def generate_nutrition_process(message: Message, session: AsyncSession, us
         ai = AIManager()
         raw_pages = await ai.generate_nutrition_pages(user_data)
         
-        # Если clean_text не импортирован, тут может быть ошибка, но я оставляю твой код:
-        from utils.text_tools import clean_text # На всякий случай добавил импорт, чтобы не упало
         cleaned_pages = [clean_text(p) for p in raw_pages if len(p) > 20]
         
         if not cleaned_pages:
-            if status_msg: await status_msg.edit_text("⚠️ Тренер задумался и ничего не ответил. Попробуй еще раз.")
-            else: await message.answer("⚠️ Тренер задумался и ничего не ответил. Попробуй еще раз.")
+            await message.answer("⚠️ Тренер задумался и ничего не ответил. Попробуй еще раз.")
             return
 
-        import json
         pages_json = json.dumps(cleaned_pages, ensure_ascii=False)
         await UserCRUD.update_user(session, user.telegram_id, current_nutrition_program=pages_json)
         
-        # Сохраняем историю даже если отработало через блок except!
+        if not is_admin_user:
+            await UserCRUD.decrement_workout_limit(session, user.telegram_id)
+            
         await UserCRUD.save_program_history(session, user.telegram_id, 'nutrition', pages_json)
-        
-        # Тут у тебя вызывалась show_pages (видимо, импортирована где-то выше)
         await show_pages(message, state, cleaned_pages, from_db=False)
 
-# --- ЛИСТАЛКА ---
+# --- ЛИСТАЛКА И WISHES ---
 @router.callback_query(F.data.startswith("nutrition_page_"))
 async def change_nutrition_page(callback: CallbackQuery, session: AsyncSession):
     try:
@@ -316,34 +304,26 @@ async def change_nutrition_page(callback: CallbackQuery, session: AsyncSession):
             return
 
         pages = json.loads(user.current_nutrition_program)
-        
         if page < 0 or page >= len(pages):
             await callback.answer()
             return
 
         await callback.message.edit_text(
-            pages[page],
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_nutrition_kb_with_diary(page, len(pages)) # <-- ИСПОЛЬЗУЕМ ХЕЛПЕР
+            pages[page], parse_mode=ParseMode.HTML,
+            reply_markup=get_nutrition_kb_with_diary(page, len(pages))
         )
         await callback.answer()
-
-    except TelegramBadRequest:
-        await callback.answer()
     except Exception as e:
-        print(f"Ошибка пагинации: {e}")
         await callback.answer()
 
 @router.message(WorkoutRequest.waiting_for_nutrition_wishes)
 async def process_nutrition_wishes(message: Message, state: FSMContext, session: AsyncSession):
-    # 1. СРАЗУ сбрасываем состояние, чтобы бот не генерировал меню по кругу
     await state.set_state(None) 
     
     user_wishes = message.text
     data = await state.get_data()
     old_wishes = data.get("wishes", "")
     
-    # Логика склеивания пожеланий
     if old_wishes and user_wishes.lower() != "без изменений":
         combined_wishes = f"{old_wishes}. Дополнительно: {user_wishes}"
     else:
@@ -353,11 +333,8 @@ async def process_nutrition_wishes(message: Message, state: FSMContext, session:
     user = await UserCRUD.get_user(session, message.from_user.id)
     
     status_msg = await message.answer("👨‍🍳 <b>Тренер составляет меню...</b>", parse_mode="HTML")
-    
-    # Запускаем генерацию
     await generate_nutrition_process(message, session, user, state, wishes=combined_wishes, status_msg=status_msg)
 
-# --- ПОИСК РЕЦЕПТОВ ---
 @router.callback_query(F.data == "recipe_search")
 async def start_recipe_search(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -374,7 +351,6 @@ async def process_recipe_search(message: Message, state: FSMContext):
     try:
         link, title, desc = await search_recipe_video(message.text)
         await loading.delete()
-        
         if link:
             await message.answer(f"🎬 <b>{title}</b>\n\n{desc}\n\n<a href='{link}'>Смотреть видео</a>", parse_mode=ParseMode.HTML)
             search_again_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔍 Найти еще", callback_data="recipe_search")]])
@@ -384,9 +360,7 @@ async def process_recipe_search(message: Message, state: FSMContext):
             retry_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="recipe_search")]])
             await message.answer("❌ Ничего не нашлось. Попробуешь другое название?", reply_markup=retry_kb)
             await state.clear()
-            
     except Exception as e:
-        print(f"Ошибка поиска: {e}")
         if 'loading' in locals(): await loading.delete()
         await message.answer("❌ Ошибка при поиске. Попробуй позже.")
         await state.clear()
@@ -398,58 +372,75 @@ async def redirect_to_chat(callback: CallbackQuery, state: FSMContext):
     await start_chat_logic(callback.message, state)        
          
 # --- БЛОКИ ЗАПИСИ ПИТАНИЯ (ИИ ДНЕВНИК КБЖУ) ---
-# ==========================================
-# КНОПКА "ЗАВЕРШИТЬ ЗАПИСЬ"
-# ==========================================
 @router.message(F.text == "🔙 Завершить запись")
 async def stop_logging_nutrition(message: Message, session: AsyncSession, state: FSMContext):
-    # 1. Очищаем состояние (бот перестает ждать еду)
     await state.clear()
-    
-    # 2. Убираем клавиатуру ввода (ReplyKeyboardRemove) и пишем короткое сообщение
     from aiogram.types import ReplyKeyboardRemove
-    temp_msg = await message.answer(
-        "✅ Запись в дневник завершена.", 
-        reply_markup=ReplyKeyboardRemove()
-    )
-    
-    # 3. Сразу же показываем раздел "Мое меню" (как будто юзер сам нажал эту кнопку)
+    await message.answer("✅ Запись в дневник завершена.", reply_markup=ReplyKeyboardRemove())
     await show_my_nutrition(message, session, state)
 
 @router.message(F.voice | F.text, RecipeState.waiting_for_nutrition_data)
 async def process_nutrition_input(message: Message, session: AsyncSession, state: FSMContext, bot: Bot):
     if message.text == "🔙 Завершить запись": return
 
+    user = await UserCRUD.get_user(session, message.from_user.id)
+    is_admin_user = is_admin(message.from_user.id)
+
+    # 1. ПРОВЕРКА ЛИМИТОВ ВОПРОСОВ (ДЛЯ ДНЕВНИКА ИСПОЛЬЗУЕТСЯ ЛИМИТ ЧАТА)
+    if not is_admin_user and (user.chat_limit or 0) <= 0:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Апгрейд / Подписка", callback_data="buy_premium")]
+        ])
+        await message.answer(
+            "❌ <b>Лимит исчерпан!</b>\n\n"
+            "У вас закончились вопросы. Оформите подписку или приобретите разовый <b>Апгрейд</b>, чтобы продолжить вести дневник.",
+            reply_markup=kb, parse_mode="HTML"
+        )
+        return
+
+    # 2. ПРОВЕРКА ГОЛОСОВЫХ И ТАРИФА
+    if message.voice and not is_admin_user:
+        user_sub = user.subscription_level or "free"
+        
+        if user_sub in ["free", "lite"]:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 Улучшить подписку", callback_data="buy_premium")]
+            ])
+            await message.answer(
+                "🎙 <b>Голосовой ввод доступен с тарифа Standard!</b>\n\n"
+                "Оформи подписку, чтобы просто надиктовывать свои приемы пищи, а не печатать их вручную.",
+                reply_markup=kb, parse_mode="HTML"
+            )
+            return
+            
+        duration = message.voice.duration
+        if user_sub == "standard" and duration > 40:
+            await message.answer("⚠️ На тарифе <b>Standard</b> максимальная длина голосового — 40 секунд. Пожалуйста, продиктуй короче.")
+            return
+        if user_sub == "ultra" and duration > 120:
+            await message.answer("⚠️ Максимальная длина голосового — 2 минуты. Пожалуйста, продиктуй короче.")
+            return
+
     status_msg = await message.answer("📡 <i>Раскладываю еду на белки, жиры и углеводы...</i>", parse_mode="HTML")
     manager = AIManager()
     
     try:
         if message.voice:
-            # 1. Защита от слишком длинных аудио (больше 60 секунд)
-            if message.voice.duration > 60:
-                await message.answer("⚠️ Голосовое слишком длинное! Пожалуйста, диктуй еду короче (до 1 минуты).")
-                return
-
             file_id = message.voice.file_id
             file = await bot.get_file(file_id)
             temp_filename = f"voice_nut_{message.from_user.id}.ogg"
             
-            # 2. Включаем статус "печатает..."
-            from aiogram.enums import ChatAction
             await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
-            
             await bot.download_file(file.file_path, temp_filename)
             await asyncio.sleep(0.1)
             
             user_text = await manager.transcribe_voice(temp_filename)
             
-            # Удаляем временный файл
             if os.path.exists(temp_filename):
                 os.remove(temp_filename)
         else:
             user_text = message.text
 
-        # 🔥 ТВОИ НАСТРОЙКИ ВРЕМЕНИ
         current_time = datetime.datetime.now().strftime("%H:%M")
 
         parse_prompt = (
@@ -479,7 +470,7 @@ async def process_nutrition_input(message: Message, session: AsyncSession, state
         lines = parsed_response.strip().split('\n')
         report = "📝 <b>Добавлено в дневник КБЖУ:</b>\n\n"
         
-        added_logs_ids = [] # <-- Собираем ID добавленных записей
+        added_logs_ids = []
         
         for line in lines:
             parts = line.split('|')
@@ -499,7 +490,7 @@ async def process_nutrition_input(message: Message, session: AsyncSession, state
                         calories=kcal, protein=p, fat=f, carbs=c
                     )
                     session.add(new_log)
-                    await session.flush() # Получаем ID из базы до коммита
+                    await session.flush() 
                     added_logs_ids.append(new_log.id)
                     
                     report += f"🕒 <b>{meal}</b> | 🍽 <b>{name}</b> ({weight}г)\n├ 🔥 {kcal} ккал\n└ 🥩 Б:{p} | 🧈 Ж:{f} | 🍞 У:{c}\n\n"
@@ -507,15 +498,10 @@ async def process_nutrition_input(message: Message, session: AsyncSession, state
         
         await session.commit()
 
-        # 🔥 ВОТ ЭТОТ БЛОК НУЖНО ДОБАВИТЬ:
-        # Списываем лимит "Вопросы и Запись" (chat_limit)
-        from handlers.admin import is_admin
-        user = await UserCRUD.get_user(session, message.from_user.id)
-        if added_logs_ids and not is_admin(message.from_user.id):
-            user.chat_limit -= 1
-            await session.commit()
+        # 3. БЕЗОПАСНОЕ СПИСАНИЕ ЛИМИТА
+        if added_logs_ids and not is_admin_user:
+            await UserCRUD.decrement_chat_limit(session, message.from_user.id)
         
-        # 🔥 СОХРАНЯЕМ ID В ПАМЯТЬ СОСТОЯНИЯ ДЛЯ КНОПКИ "ОТМЕНА"
         if added_logs_ids:
             await state.update_data(last_added_nut_ids=added_logs_ids)
             kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -530,8 +516,6 @@ async def process_nutrition_input(message: Message, session: AsyncSession, state
         await status_msg.edit_text("❌ Ошибка при анализе. Попробуй написать текстом.")
 
 # --- УДАЛЕНИЕ ЗАПИСЕЙ ПИТАНИЯ ---
-
-# 1. Мгновенная отмена последнего добавления
 @router.callback_query(F.data == "undo_last_nutrition")
 async def undo_last_nutrition(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     data = await state.get_data()
@@ -540,7 +524,6 @@ async def undo_last_nutrition(callback: CallbackQuery, session: AsyncSession, st
     if not ids_to_delete:
         return await callback.answer("⏳ Время вышло или записи уже отменены.", show_alert=True)
 
-    # Удаляем записи из базы
     stmt = select(NutritionLog).where(NutritionLog.id.in_(ids_to_delete), NutritionLog.user_id == callback.from_user.id)
     result = await session.execute(stmt)
     logs = result.scalars().all()
@@ -549,11 +532,10 @@ async def undo_last_nutrition(callback: CallbackQuery, session: AsyncSession, st
         await session.delete(log)
     
     await session.commit()
-    await state.update_data(last_added_nut_ids=[]) # Очищаем память
+    await state.update_data(last_added_nut_ids=[])
 
     await callback.message.edit_text("🗑 <b>Записи отменены!</b>\nНичего не попало в сводку. Можешь продиктовать заново.", parse_mode="HTML")
 
-# 2. Точечное удаление через команду в Сводке
 @router.message(F.text.regexp(r'^/del_\d+$'))
 async def delete_single_log(message: Message, session: AsyncSession):
     log_id = int(message.text.split('_')[1])
@@ -579,7 +561,6 @@ async def show_today_nutrition(callback: CallbackQuery, session: AsyncSession):
     if not logs:
         return await callback.answer("Твой дневник питания на сегодня пуст!", show_alert=True)
 
-    # 🔥 ГРУППИРУЕМ ПО ТИПУ ПРИЕМА ПИЩИ
     meals = {"Завтрак": [], "Обед": [], "Ужин": [], "Перекус": []}
     total_kcal = total_p = total_f = total_c = 0.0
     
@@ -598,7 +579,6 @@ async def show_today_nutrition(callback: CallbackQuery, session: AsyncSession):
             meal_kcal = sum(l.calories for l in meal_logs)
             text += f"🕒 <b>{meal_name}</b> ({int(meal_kcal)} ккал):\n"
             for log in meal_logs:
-                # 🔥 ТЕПЕРЬ РЯДОМ С КАЖДЫМ БЛЮДОМ ЕСТЬ КОМАНДА /del_ID
                 text += f"  • {log.product_name} ({log.weight}г) — {log.calories} ккал  /del_{log.id}\n"
             text += "\n"
         
@@ -609,29 +589,22 @@ async def show_today_nutrition(callback: CallbackQuery, session: AsyncSession):
     text += f"🍞 <b>Углеводы:</b> {round(total_c)} г\n"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Добавить прием пищи", callback_data="log_nutrition_press")], # Убедись, что хендлер log_nutrition_press у тебя существует!
+        [InlineKeyboardButton(text="📝 Добавить прием пищи", callback_data="log_nutrition_press")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_my_menu")]
     ])
     
-    # Меняем answer на edit_text и подставляем правильную переменную (например, text)
     try:
         await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
     except Exception:
-        # Если edit_text по какой-то причине не сработает, отправляем новым сообщением
         await callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
         
-    await callback.answer() # Гасим часики
-# ==========================================
-# ВОЗВРАТ ИЗ СВОДКИ НАЗАД В "МОЕ МЕНЮ"
-# ==========================================
+    await callback.answer()
+
 @router.callback_query(F.data == "back_to_my_menu")
 async def back_to_my_menu_callback(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    # Удаляем сообщение со сводкой, чтобы не засорять чат
     try:
         await callback.message.delete()
     except Exception:
         pass
-        
-    # Просто вызываем существующую функцию показа "Моего меню"
     await show_my_nutrition(callback.message, session, state)
-    await callback.answer()    
+    await callback.answer()

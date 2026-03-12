@@ -1,8 +1,8 @@
 import logging
 import re
 from aiogram import Router, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.filters import CommandStart, CommandObject
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # --- СТАРТ ---
 @router.message(CommandStart())
-async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
+async def cmd_start(message: Message, command: CommandObject, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, message.from_user.id)
     
     if user:
@@ -34,6 +34,10 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
             parse_mode="HTML"
         )
     else:
+        # --- ЛОВИМ РЕФЕРАЛЬНУЮ ССЫЛКУ ---
+        if command.args and command.args.isdigit():
+            await state.update_data(referrer_id=int(command.args))
+            
         # Автоматическое имя
         first_name = message.from_user.first_name
         await message.answer(
@@ -51,7 +55,7 @@ async def process_gender(message: Message, state: FSMContext):
     gender = "male" if "Мужской" in message.text else "female"
     await state.update_data(gender=gender)
     
-    await message.answer("Сколько тебе лет?", reply_markup=None)
+    await message.answer("Сколько тебе лет?")
     await state.set_state(Registration.age)
 
 # 2. ВОЗРАСТ -> ВЕС
@@ -59,16 +63,13 @@ async def process_gender(message: Message, state: FSMContext):
 async def process_age(message: Message, state: FSMContext):
     try:
         age = int(message.text.strip())
-        
-        # Проверка диапазона
         if not (10 <= age <= 90):
             await message.answer("🤔 Укажи, пожалуйста, реальный возраст (от 10 до 90 лет):")
             return
             
         await state.update_data(age=age)
-        await message.answer("⚖️ Принято! Теперь введи свой вес (кг). Можно через точку или запятую:")
+        await message.answer("⚖️ Принято! Теперь введи свой вес (кг).")
         await state.set_state(Registration.weight)
-        
     except ValueError:
         await message.answer("⚠️ Пожалуйста, введи возраст числом (например: 25):")
 
@@ -76,11 +77,8 @@ async def process_age(message: Message, state: FSMContext):
 @router.message(Registration.weight)
 async def process_weight(message: Message, state: FSMContext):
     try:
-        # 🔥 ИСПРАВЛЕНИЕ: убираем пробелы и меняем запятую на точку
         clean_input = message.text.strip().replace(',', '.')
         w = float(clean_input)
-        
-        # Проверка на адекватность веса (от 30 до 250 кг)
         if not (30 <= w <= 250):
             await message.answer("🤔 Хмм, кажется вес указан неверно. Введи реальный вес (от 30 до 250 кг):")
             return
@@ -88,7 +86,6 @@ async def process_weight(message: Message, state: FSMContext):
         await state.update_data(weight=w)
         await message.answer("📏 Отлично! Теперь введи свой рост в см (например: 180):")
         await state.set_state(Registration.height)
-        
     except ValueError:
         await message.answer("⚠️ Пожалуйста, введи только число (например: 75.5 или 80).")
 
@@ -96,11 +93,8 @@ async def process_weight(message: Message, state: FSMContext):
 @router.message(Registration.height)
 async def process_height(message: Message, state: FSMContext):
     try:
-        # Убираем пробелы и меняем запятую на точку (на случай если введут 180.5)
         clean_input = message.text.strip().replace(',', '.')
         h = float(clean_input)
-        
-        # Проверка диапазона
         if not (100 <= h <= 250):
             await message.answer("🤔 Кажется, в росте ошибка. Введи рост в сантиметрах (от 100 до 250):")
             return
@@ -108,7 +102,6 @@ async def process_height(message: Message, state: FSMContext):
         await state.update_data(height=h)
         await message.answer("🎯 Почти готово! Какая у тебя цель?", reply_markup=get_goal_keyboard())
         await state.set_state(Registration.goal)
-        
     except ValueError:
         await message.answer("⚠️ Пожалуйста, введи рост числом (например: 175):")
 
@@ -119,7 +112,7 @@ async def process_goal(message: Message, state: FSMContext):
         "📉 Похудение": "weight_loss", 
         "⚖️ Поддержание": "maintenance", 
         "💪 Набор массы": "muscle_gain",
-        "🔄 Рекомпозиция": "recomposition" # Добавлено
+        "🔄 Рекомпозиция": "recomposition"
     }
     selected = goals.get(message.text, "maintenance")
     await state.update_data(goal=selected, goal_text=message.text)
@@ -140,7 +133,6 @@ async def process_level(message: Message, state: FSMContext):
 # 7. АКТИВНОСТЬ -> ДНИ
 @router.message(Registration.activity_level)
 async def process_activity(message: Message, state: FSMContext):
-    # Упрощенный маппинг активности для базы
     val = "moderate"
     if "Сидячая" in message.text: val = "sedentary"
     elif "Малая" in message.text: val = "light"
@@ -161,41 +153,53 @@ async def process_days(message: Message, state: FSMContext, session: AsyncSessio
     
     data = await state.get_data()
     
+    # ЗАЩИТА ОТ ОШИБОК: Используем .get() для предотвращения KeyError
+    gender = data.get('gender', 'male')
+    age = data.get('age', 25)
+    weight = data.get('weight', 70.0)
+    height = data.get('height', 170.0)
+    goal = data.get('goal', 'maintenance')
+    workout_level = data.get('workout_level', 'beginner')
+    activity_level = data.get('activity_level', 'moderate')
+    referrer_id = data.get('referrer_id')
+    
     # Создаем пользователя
     await UserCRUD.add_user(
         session,
         telegram_id=message.from_user.id,
+        referrer_id=referrer_id,  # Учитываем реферала!
         name=message.from_user.first_name,
-        age=data['age'],
-        weight=data['weight'],
-        height=data['height'],
-        gender=data['gender'],
-        goal=data['goal'],
-        workout_level=data['workout_level'],
-        activity_level=data['activity_level'],
+        age=age,
+        weight=weight,
+        height=height,
+        gender=gender,
+        goal=goal,
+        workout_level=workout_level,
+        activity_level=activity_level,
         workout_days=days
     )
     
     # Добавляем историю веса
-    session.add(WeightHistory(user_id=message.from_user.id, weight=data['weight']))
+    session.add(WeightHistory(user_id=message.from_user.id, weight=weight))
     await session.commit()
     
-    # Получаем красивое название цели
+    # 🔥 НАЧИСЛЯЕМ БОНУС ЗА РЕГИСТРАЦИЮ (5 генераций, 10 вопросов) 🔥
+    await UserCRUD.apply_registration_bonus(session, message.from_user.id)
+    
     goals_map_rev = {
         "weight_loss": "📉 Похудение", 
         "maintenance": "⚖️ Поддержание", 
         "muscle_gain": "💪 Набор массы",
         "recomposition": "🔄 Рекомпозиция"
     }
-    goal_label = data.get('goal_text', goals_map_rev.get(data['goal'], "Форма"))
+    goal_label = data.get('goal_text', goals_map_rev.get(goal, "Форма"))
 
     await state.clear()
     
-    # 🔥 ВОЗВРАЩАЕМ ИНФОРМАТИВНОЕ СООБЩЕНИЕ
     await message.answer(
         f"✅ <b>Профиль успешно создан!</b>\n\n"
         f"👤 <b>Имя:</b> {message.from_user.first_name}\n"
-        f"📊 <b>Вес:</b> {data['weight']} кг\n"
+        f"📊 <b>Вес:</b> {weight} кг\n"
         f"🎯 <b>Цель:</b> {goal_label}\n"
         f"📅 <b>Режим:</b> {days} дн/нед\n\n"
         "Теперь я могу составлять для тебя программы тренировок и питания! Жми кнопки в меню 👇",

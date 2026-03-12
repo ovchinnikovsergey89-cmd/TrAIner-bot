@@ -31,11 +31,7 @@ def get_main_menu() -> ReplyKeyboardMarkup:
         KeyboardButton(text="📊 Анализ")
     )
     
-    # 5-й ряд: Настройки
-    #builder.row(
-        #KeyboardButton(text="🔄 Изменить данные")
-    #)
-    
+      
     return builder.as_markup(resize_keyboard=True)
 
 def get_gender_keyboard() -> ReplyKeyboardMarkup:

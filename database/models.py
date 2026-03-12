@@ -9,6 +9,12 @@ class User(Base):
     telegram_id = Column(BigInteger, primary_key=True)
     name = Column(String, nullable=True)
     
+    # === НОВЫЕ ПОЛЯ: РЕФЕРАЛЬНАЯ СИСТЕМА И БОНУСЫ ===
+    referrer_id = Column(BigInteger, ForeignKey('users.telegram_id'), nullable=True) # ID того, кто пригласил
+    referral_balance = Column(Float, default=0.0) # Баланс кэшбэка с рефералов
+    is_bonus_used = Column(Boolean, default=False) # Получил ли юзер бонус за регистрацию
+    # ================================================
+    
     # --- Данные подписки ---
     subscription_level = Column(String, default="free")
     subscription_expires_at = Column(DateTime, nullable=True)
