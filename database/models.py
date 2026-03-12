@@ -4,7 +4,14 @@ from database.database import Base
 import datetime 
 
 class User(Base):
-    __tablename__ = 'users'
+    __tablename__ = 'users'      
+    
+    
+    target_calories = Column(Float, default=0.0)
+    target_protein = Column(Float, default=0.0)
+    target_fat = Column(Float, default=0.0)
+    target_carbs = Column(Float, default=0.0)  
+    
 
     is_agreed = Column(Boolean, default=False) # Принял ли соглашение
     agreed_at = Column(DateTime, nullable=True) # Когда именно принял

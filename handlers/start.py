@@ -1,14 +1,15 @@
 import logging
 import re
 from aiogram import Router, F
-from aiogram.filters import CommandStart, CommandObject
+from aiogram.filters import CommandStart, CommandObject, Command
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func  # Вот этой строки тебе не хватает
 
 from datetime import datetime
 from database.crud import UserCRUD
-from database.models import WeightHistory
+from database.models import WeightHistory, User, NutritionLog, WorkoutLog
 from states.user_states import Registration
 from keyboards.builders import (
     get_gender_keyboard, 
@@ -32,14 +33,16 @@ async def cmd_start(message: Message, command: CommandObject, session: AsyncSess
     if not user or not getattr(user, 'is_agreed', False):
         # Текст дисклеймера
         disclaimer_text = (
-            "🤖 <b>TrAIner bot | Официальный доступ</b>\n\n"
-            "Добро пожаловать! Чтобы активировать ваш персональный ИИ-наставник и "
-            "начать расчет программ тренировок, необходимо подтвердить согласие с регламентом сервиса.\n\n"
-            "<b>Что это значит для вас?</b>\n"
-            "🛡 Ваше здоровье — ваша ответственность (консультируйтесь с врачом).\n"
-            "📊 Ваши данные в безопасности и используются только для расчетов.\n"
-            "🧠 рекомендации ИИ — это мощный инструмент, но не истина в последней инстанции.\n\n"
-            "<i>Ознакомьтесь с полной версией договора по кнопке ниже:</i>"
+            "<b>TrAIner | Твой персональный ИИ-наставник</b> 🤖\n\n"
+            "Привет! Я — прогрессивная нейросеть, обученная передовым методикам фитнеса и нутрициологии. "
+            "В отличие от обычных ботов, я не просто выдаю шаблоны, а создаю <b>уникальную стратегию</b>, "
+            "подстроенную под твой метаболизм, график и цели.\n\n"
+            "<b>Что я умею:</b>\n"
+            "📊 <b>Умный расчет:</b> Калории и КБЖУ с точностью до грамма.\n"
+            "🏋️ <b>Адаптивные тренировки:</b> Планы, которые меняются вместе с твоим прогрессом.\n"
+            "🧠 <b>ИИ-консультант:</b> Отвечу на любой вопрос по тренингу и биохимии питания.\n"
+            "📈 <b>Аналитика:</b> Наглядные графики твоего пути к результату.\n\n"
+            "<i>Чтобы открыть все функции и начать трансформацию:</i>"
         )
         
         # Ссылка на соглашение (можешь заменить на свою ссылку на Telegra.ph)
@@ -289,3 +292,72 @@ async def process_days(message: Message, state: FSMContext, session: AsyncSessio
         reply_markup=get_main_menu(),
         parse_mode="HTML"
     )
+
+# Обработчик команды /journal
+@router.message(Command("journal"))
+async def cmd_journal(message: Message, state: FSMContext, session: AsyncSession):
+    await state.clear()
+    user_id = message.from_user.id
+    
+    # Получаем профиль пользователя
+    result = await session.execute(select(User).where(User.telegram_id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        return await message.answer("Сначала пройдите регистрацию /start")
+
+    # 1. Считаем ФАКТ (Питание из логов за сегодня)
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    stats_query = select(
+        func.sum(NutritionLog.calories).label("total_cal"),
+        func.sum(NutritionLog.protein).label("total_prot"),
+        func.sum(NutritionLog.fat).label("total_fat"),
+        func.sum(NutritionLog.carbs).label("total_carb")
+    ).where(NutritionLog.user_id == user_id, NutritionLog.date >= today_start)
+    
+    stats_result = await session.execute(stats_query)
+    stats = stats_result.fetchone()
+    
+    # Фактически съеденные нутриенты
+    cur_cal = stats.total_cal or 0
+    cur_prot = stats.total_prot or 0
+    cur_fat = stats.total_fat or 0
+    cur_carb = stats.total_carb or 0
+
+    # 2. Проверяем наличие тренировки сегодня
+    workout_today_query = select(WorkoutLog).where(
+        WorkoutLog.user_id == user_id, 
+        WorkoutLog.date >= today_start
+    )
+    workout_today_result = await session.execute(workout_today_query)
+    has_workout_today = workout_today_result.scalars().first() is not None
+
+    # 3. Целевые показатели (берем из новых колонок в таблице users)
+    # Используем .get() или прямые атрибуты, так как ты добавил их в models.py
+    goal_cal = user.target_calories or 0
+    goal_prot = user.target_protein or 0
+    goal_fat = user.target_fat or 0
+    goal_carb = user.target_carbs or 0
+
+    # 4. Прогресс тренировок
+    done_workouts = user.completed_workouts or 0
+    plan_days = user.workout_days or 0 
+    workout_status = "✅ Выполнена" if has_workout_today else "❌ Еще не было"
+
+    report_text = (
+        "📊 <b>Ваш отчет за сегодня:</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🍎 <b>Калории:</b> {cur_cal:.0f} / {goal_cal:.0f} ккал\n"
+        f"🧬 <b>Б:</b> {cur_prot:.1f}/{goal_prot:.1f}г | "
+        f"<b>Ж:</b> {cur_fat:.1f}/{goal_fat:.1f}г | "
+        f"<b>У:</b> {cur_carb:.1f}/{goal_carb:.1f}г\n\n"
+        f"⚖️ <b>Ваш вес:</b> {user.weight if user.weight else '—'} кг\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🏋️ <b>Прогресс:</b> {done_workouts} из {plan_days} за неделю\n"
+        f"📅 <b>Сегодня:</b> {workout_status}\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "<i>Данные подтянуты из вашего профиля и истории активности.</i>"
+    )
+    
+    # Импортируй get_main_menu, если функция находится в другом файле
+    await message.answer(report_text, reply_markup=get_main_menu())   
