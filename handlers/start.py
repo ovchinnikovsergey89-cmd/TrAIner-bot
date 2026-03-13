@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func  # Вот этой строки тебе не хватает
 
 from datetime import datetime
+from services.calculators import NutritionCalculator
 from database.crud import UserCRUD
 from database.models import WeightHistory, User, NutritionLog, WorkoutLog
 from states.user_states import Registration
@@ -225,6 +226,8 @@ async def process_activity(message: Message, state: FSMContext):
 async def process_days(message: Message, state: FSMContext, session: AsyncSession):
     try:
         days = int(re.search(r'\d+', message.text).group())
+        if days > 7:  # НОВОЕ: Защита от больших чисел или ID
+            days = 3
     except:
         days = 3
     
@@ -308,6 +311,7 @@ async def cmd_journal(message: Message, state: FSMContext, session: AsyncSession
 
     # 1. Считаем ФАКТ (Питание из логов за сегодня)
     today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
     stats_query = select(
         func.sum(NutritionLog.calories).label("total_cal"),
         func.sum(NutritionLog.protein).label("total_prot"),
@@ -318,13 +322,18 @@ async def cmd_journal(message: Message, state: FSMContext, session: AsyncSession
     stats_result = await session.execute(stats_query)
     stats = stats_result.fetchone()
     
-    # Фактически съеденные нутриенты
-    cur_cal = stats.total_cal or 0
-    cur_prot = stats.total_prot or 0
-    cur_fat = stats.total_fat or 0
-    cur_carb = stats.total_carb or 0
+    cur_cal = stats.total_cal if stats and stats.total_cal else 0
+    cur_prot = stats.total_prot if stats and stats.total_prot else 0
+    cur_fat = stats.total_fat if stats and stats.total_fat else 0
+    cur_carb = stats.total_carb if stats and stats.total_carb else 0
 
-    # 2. Проверяем наличие тренировки сегодня
+    # 2. Берем ЦЕЛИ ИЗ БАЗЫ (если план еще не составлен, ставим 0)
+    goal_cal = user.target_calories or 0
+    goal_prot = user.target_protein or 0
+    goal_fat = user.target_fat or 0
+    goal_carb = user.target_carbs or 0
+
+    # 3. Проверяем наличие тренировки сегодня
     workout_today_query = select(WorkoutLog).where(
         WorkoutLog.user_id == user_id, 
         WorkoutLog.date >= today_start
@@ -332,32 +341,43 @@ async def cmd_journal(message: Message, state: FSMContext, session: AsyncSession
     workout_today_result = await session.execute(workout_today_query)
     has_workout_today = workout_today_result.scalars().first() is not None
 
-    # 3. Целевые показатели (берем из новых колонок в таблице users)
-    # Используем .get() или прямые атрибуты, так как ты добавил их в models.py
-    goal_cal = user.target_calories or 0
-    goal_prot = user.target_protein or 0
-    goal_fat = user.target_fat or 0
-    goal_carb = user.target_carbs or 0
-
-    # 4. Прогресс тренировок
+    # 4. Прогресс тренировок ИЗ БАЗЫ
     done_workouts = user.completed_workouts or 0
     plan_days = user.workout_days or 0 
+    
     workout_status = "✅ Выполнена" if has_workout_today else "❌ Еще не было"
 
     report_text = (
         "📊 <b>Ваш отчет за сегодня:</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"🍎 <b>Калории:</b> {cur_cal:.0f} / {goal_cal:.0f} ккал\n"
-        f"🧬 <b>Б:</b> {cur_prot:.1f}/{goal_prot:.1f}г | "
-        f"<b>Ж:</b> {cur_fat:.1f}/{goal_fat:.1f}г | "
-        f"<b>У:</b> {cur_carb:.1f}/{goal_carb:.1f}г\n\n"
-        f"⚖️ <b>Ваш вес:</b> {user.weight if user.weight else '—'} кг\n"
+        f"🔥 <b>Калории:</b> {cur_cal:.0f} / {goal_cal:.0f} ккал\n"
+        f"🥩 <b>Белки:</b> {cur_prot:.1f} / {goal_prot:.1f}г\n"
+        f"🥑 <b>Жиры:</b> {cur_fat:.1f} / {goal_fat:.1f}г\n"
+        f"🍝 <b>Углеводы:</b> {cur_carb:.1f} / {goal_carb:.1f}г\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"🏋️ <b>Прогресс:</b> {done_workouts} из {plan_days} за неделю\n"
+        f"🏋️ <b>Тренировки:</b> {done_workouts} из {plan_days} за неделю\n"
         f"📅 <b>Сегодня:</b> {workout_status}\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "<i>Данные подтянуты из вашего профиля и истории активности.</i>"
+        f"⚖️ <b>Ваш вес:</b> {user.weight if user.weight else '—'} кг\n\n"
+        "<i>Данные формируются из вашего текущего плана и записей за сегодня.</i>"
     )
     
-    # Импортируй get_main_menu, если функция находится в другом файле
-    await message.answer(report_text, reply_markup=get_main_menu())   
+    await message.answer(report_text, reply_markup=get_main_menu())  
+
+@router.message(Command("fast"))
+async def cmd_fast(message: Message, state: FSMContext):
+    await state.clear()
+    
+    # Кнопки в один ряд
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🏋️ Рабочие веса", callback_data="log_weight_press"),
+            InlineKeyboardButton(text="🍎 Прием пищи", callback_data="log_nutrition_press")
+        ]
+    ])
+    
+    await message.answer(
+        "⚡ <b>Быстрая запись</b>\n"
+        "Выберите, что нужно зафиксировать:", 
+        reply_markup=kb
+    )

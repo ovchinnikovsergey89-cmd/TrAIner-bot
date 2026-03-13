@@ -105,7 +105,7 @@ async def send_morning_motivation(bot: Bot, session_pool: async_sessionmaker):
                     
                     await bot.send_message(user.telegram_id, f"⚡️ <b>Тренер на связи:</b>\n\n{ai_text}", parse_mode="HTML")
 
-                # --- ЛОГИКА ДЛЯ ULTRA (Учитывает Тренировки + Питание) ---
+                # --- ЛОГИКА ДЛЯ ULTRA (Учитывает Тренировки + Питание + Общие советы) ---
                 elif sub_level == "ultra":
                     stmt_n = select(
                         func.sum(NutritionLog.calories).label("kcal"),
@@ -118,13 +118,18 @@ async def send_morning_motivation(bot: Bot, session_pool: async_sessionmaker):
                     kcal = int(nut_data.kcal or 0)
                     protein = int(nut_data.p or 0)
                     
-                    nut_info = f"Съедено сегодня: {kcal} ккал, {protein}г белка." if kcal > 0 else "Сегодня еще не вел дневник питания."
+                    # Если данных о еде нет, даем ИИ свободу выбора темы
+                    if kcal > 0:
+                        nut_info = f"По питанию сегодня: {kcal} ккал, {protein}г белка."
+                    else:
+                        nut_info = "Данных по еде сегодня еще нет. Можешь дать совет по восстановлению, сну или мотивации."
 
                     prompt = (
-                        f"Ты элитный фитнес-тренер и нутрициолог. Клиент Ultra (Цель: {user.goal}). "
-                        f"Активность: {workout_info}. {nut_info} "
-                        f"Напиши КОРОТКИЙ (максимум 200 символов) персональный микро-совет или напоминание. "
-                        f"Без приветствий. Обрати внимание на цифры, если они есть."
+                        f"Ты элитный фитнес-коуч уровня Ultra. Клиент (Цель: {user.goal}). "
+                        f"Статус тренировок: {workout_info}. {nut_info} "
+                        f"ЗАДАЧА: Напиши ОЧЕНЬ КОРОТКИЙ (до 180 симв.) персональный инсайт. "
+                        f"Если данных мало — дай совет по биохакингу, режиму или психологии успеха. "
+                        f"Без приветствий. Будь максимально разнообразным, не зацикливайся на одном питании!"
                     )
                     ai_text = await manager.get_chat_response([{"role": "user", "content": prompt}], {})
                     

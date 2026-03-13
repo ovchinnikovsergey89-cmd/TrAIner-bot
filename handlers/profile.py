@@ -343,9 +343,9 @@ async def save_notif_time(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("❌ Произошла ошибка при установке времени.", show_alert=True)    
 
 # ==========================================
-# 8. ДНЕВНИК РАБОЧИХ ВЕСОВ
+# 8. ДНЕВНИК РАБОЧИХ ВЕСОВ (С ПАГИНАЦИЕЙ)
 # ==========================================
-@router.callback_query(F.data == "exercise_diary")
+@router.callback_query(F.data.startswith("exercise_diary"))
 async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     user_id = callback.from_user.id
     user = await UserCRUD.get_user(session, user_id)
@@ -354,6 +354,12 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
     if not is_admin(user_id) and user.subscription_level in ["free", "lite", None]:
         await callback.answer("📖 Дневник рабочих весов доступен начиная с тарифа Standard!", show_alert=True)
         return
+    
+    # Определяем текущую страницу (по умолчанию 0)
+    # callback.data будет выглядеть как "exercise_diary" или "exercise_diary:1"
+    parts = callback.data.split(":")
+    page = int(parts[1]) if len(parts) > 1 else 0
+    ITEMS_PER_PAGE = 10
     
     stmt = select(WorkoutLog).where(
         WorkoutLog.user_id == user_id,
@@ -367,31 +373,59 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("Твой дневник пока пуст! Записывай веса во время тренировок.", show_alert=True)
         return
         
-    latest_logs = {}
+    # Оставляем только последние записи для каждого упражнения
+    latest_logs_dict = {}
     for log in logs:
         name = log.canonical_name if log.canonical_name else log.exercise_name
         if not name:
             continue
 
         name_key = name.lower().strip()
-        if name_key not in latest_logs:
-            latest_logs[name_key] = log
+        if name_key not in latest_logs_dict:
+            latest_logs_dict[name_key] = log
             
-    text = "📖 <b>Твой дневник рабочих весов:</b>\n\n"
+    # Превращаем словарь в список и сортируем по дате (самые свежие сверху)
+    unique_logs = list(latest_logs_dict.values())
+    unique_logs.sort(key=lambda x: x.date, reverse=True)
     
-    for log in latest_logs.values():
+    total_items = len(unique_logs)
+    total_pages = (total_items + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    
+    # Срез списка для текущей страницы
+    start_idx = page * ITEMS_PER_PAGE
+    end_idx = start_idx + ITEMS_PER_PAGE
+    page_logs = unique_logs[start_idx:end_idx]
+            
+    text = f"📖 <b>Твой дневник весов (Стр. {page + 1} из {total_pages}):</b>\n\n"
+    
+    for log in page_logs:
         date_str = log.date.strftime("%d.%m")
         weight_display = int(log.weight) if log.weight.is_integer() else log.weight
         name = log.canonical_name if log.canonical_name else log.exercise_name
         text += f"🏋️‍♂️ <b>{name.capitalize()}:</b> {weight_display} кг х {log.reps} <i>({date_str})</i>\n"
         
-    text += "\n<i>💡 Чтобы обновить результат или исправить ошибку, просто запиши новый вес для этого упражнения на тренировке.</i>"
+    text += "\n<i>💡 Чтобы обновить результат, просто запиши новый вес на тренировке.</i>"
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="close_edit_menu")]
-    ])
+    # --- СТРОИМ КЛАВИАТУРУ С ПАГИНАЦИЕЙ ---
+    kb = InlineKeyboardBuilder()
     
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    nav_buttons = []
+    # Кнопка "Назад", если мы не на первой странице
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"exercise_diary:{page - 1}"))
+        
+    # Кнопка "Вперед", если мы не на последней странице
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"exercise_diary:{page + 1}"))
+        
+    # Добавляем кнопки навигации в один ряд (если они есть)
+    if nav_buttons:
+        kb.row(*nav_buttons)
+        
+    # Добавляем кнопку возврата в профиль
+    kb.row(InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="close_edit_menu"))
+    
+    await callback.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
 # 1. Сначала показываем только баланс
 @router.callback_query(F.data == "show_balance")

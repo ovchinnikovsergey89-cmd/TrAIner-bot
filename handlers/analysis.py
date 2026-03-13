@@ -127,8 +127,11 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
             nut_text = "Нет данных."
 
         # Промпт не изменен, только добавлены точечные запреты в конец
+        target_cal = user.target_calories or "не задана"
         ai_prompt = (f"Ты нутрициолог. Оцени рацион клиента за 7 дней (Цель: {user.goal}, Вес: {user.weight}кг). "
+                     f"🎯 ЕГО РАССЧИТАННАЯ НОРМА: {target_cal} ккал. "
                      f"Сводка КБЖУ: {nut_text}. Дай профессиональный совет. "
+                     f"🚨 ЗАПРЕЩЕНО советовать клиенту другую калорийность! Оценивай только то, как он соблюдает свою норму ({target_cal} ккал). "
                      f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу. "
                      f"Пиши строго только про питание. Без приветствий (максимум 600 символов).")
 
@@ -207,10 +210,12 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
             session.add(WeightHistory(user_id=user.telegram_id, weight=new_weight))
             history_data = (await session.execute(history_stmt)).scalars().all()
         
+        # Вытаскиваем количество тренировок для всех видов анализа
+        workouts_count = await UserCRUD.get_weekly_workouts_count(session, user.telegram_id)
+        
         graph_bytes = None
         
         if analysis_type == "analyze_full":
-            workouts_count = await UserCRUD.get_weekly_workouts_count(session, user.telegram_id)
             seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
             
             nut_stmt = (
@@ -244,9 +249,13 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
             ex_text = "; ".join([f"{ex.exercise_name}: {ex.weight}кг" for ex in reversed(exercises)]) if exercises else "Нет данных"
 
             # Промпт не изменен, добавлены точечные запреты в конец
+            target_cal = user.target_calories or "не задана"
             extended_goal = (f"Ты строгий фитнес-тренер. Сделай комплексный анализ: сравни питание, тренировки и вес клиента. "
-                             f"Цель: {user.goal}. Тренировок за неделю: {workouts_count}. Рабочие веса: {ex_text}. Питание(7дн): {nut_text}. "
-                             f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу. "
+                             f"Цель: {user.goal}. 🎯 УСТАНОВЛЕННАЯ НОРМА ПИТАНИЯ: {target_cal} ккал. "
+                             f"Тренировок за неделю: {workouts_count}. Рабочие веса: {ex_text}. Питание(7дн): {nut_text}. "
+                             f"🚨 КРИТИЧЕСКИ ВАЖНО: Запрещено выдумывать и советовать свою норму калорий (типа 1800-2000)! "
+                             f"Оценивай прогресс строго относительно установленной нормы в {target_cal} ккал. "
+                             f"Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу. "
                              f"Строго без приветствий (максимум 800 символов).")
         else:
             graph_buf = await GraphService.create_weight_graph(history_data)
@@ -261,7 +270,7 @@ async def process_weight_and_analyze(message: Message, state: FSMContext, sessio
         ai = AIManager()
         ai_feedback = await ai.analyze_progress({
             "name": user.name, "weight": new_weight, "goal": extended_goal, "workout_days": user.workout_days
-        }, new_weight, 0)
+        }, new_weight, workouts_count)
 
         if not is_admin(user.telegram_id): 
             user.workout_limit -= 1

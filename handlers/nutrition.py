@@ -251,6 +251,37 @@ async def generate_nutrition_process(message: Message, session: AsyncSession, us
 
         pages_json = json.dumps(raw_pages, ensure_ascii=False)
         user.current_nutrition_program = pages_json
+        
+        # ==========================================
+        # УЛУЧШЕННЫЙ ПАРСЕР: СЧИТАЕМ СРЕДНЕЕ (160-180 -> 170)
+        # ==========================================
+        full_plan_text = " ".join(raw_pages)
+        
+        def get_average(pattern, text):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                # Если найден диапазон (есть две группы цифр)
+                if match.group(2): 
+                    val1 = int(match.group(1))
+                    val2 = int(match.group(2))
+                    return (val1 + val2) // 2
+                # Если найдена только одна цифра
+                return int(match.group(1))
+            return 0
+
+        # Калории (ищем число или диапазон, например 2200-2400)
+        user.target_calories = get_average(r'КБЖУ.*?(\d{3,4})(?:-(\d{3,4}))?\s*ккал', full_plan_text)
+        
+        # Белки (Б: 160-180 или Б: 160)
+        user.target_protein = get_average(r'Б:\s*(\d+)(?:-(\d+))?', full_plan_text)
+        
+        # Жиры (Ж: 70-90 или Ж: 80)
+        user.target_fat = get_average(r'Ж:\s*(\d+)(?:-(\d+))?', full_plan_text)
+        
+        # Углеводы (У: 200-250 или У: 220)
+        user.target_carbs = get_average(r'У:\s*(\d+)(?:-(\d+))?', full_plan_text)
+        # ==========================================
+
         await session.commit()
         
         # 2. БЕЗОПАСНОЕ СПИСАНИЕ ЛИМИТА
