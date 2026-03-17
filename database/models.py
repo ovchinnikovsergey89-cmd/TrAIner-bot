@@ -51,6 +51,7 @@ class User(Base):
 
     notification_time = Column(Integer, default=8)
     current_workout_program = Column(String, nullable=True)
+    current_workout_program_id = Column(String, nullable=True)
     current_nutrition_program = Column(String, nullable=True)
     
     created_at = Column(DateTime, default=func.now())
@@ -63,6 +64,7 @@ class WorkoutLog(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, ForeignKey("users.telegram_id")) 
+    program_id = Column(String, nullable=True)
     date = Column(DateTime, default=datetime.datetime.now)
     workout_type = Column(String, nullable=True) 
     
@@ -91,6 +93,8 @@ class ExerciseLog(Base):
     user_id = Column(BigInteger, ForeignKey("users.telegram_id"), nullable=False)
     # Исправлено на nullable=True
     exercise_name = Column(String, nullable=True) 
+    # 🔥 НОВОЕ ПОЛЕ ДЛЯ НЮАНСОВ
+    comment = Column(String, nullable=True)
     weight = Column(Float, nullable=False)
     reps = Column(Integer, nullable=False)
     date = Column(DateTime, default=datetime.datetime.now)    

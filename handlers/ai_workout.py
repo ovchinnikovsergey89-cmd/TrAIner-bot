@@ -1,3 +1,4 @@
+import uuid
 import re
 import json
 import datetime
@@ -122,7 +123,7 @@ async def show_saved_program(message: Message, session: AsyncSession, state: FSM
             saved_pages = json.loads(user.current_workout_program)
             
             # 🔥 Достаем из базы реально выполненные дни
-            stmt = select(WorkoutLog.workout_type).where(WorkoutLog.user_id == message.from_user.id)
+            stmt = select(WorkoutLog.workout_type).where(WorkoutLog.user_id == message.from_user.id, WorkoutLog.program_id == user.current_workout_program_id)
             result = await session.execute(stmt)
             logs = result.scalars().all() 
             
@@ -323,6 +324,7 @@ async def generate_workout_process(message: Message, session: AsyncSession, user
         # --- 3. СОХРАНЕНИЕ В БД И АРХИВ ---
         pages_json = json.dumps(cleaned_pages, ensure_ascii=False)
         user.current_workout_program = pages_json
+        user.current_workout_program_id = str(uuid.uuid4()) # Генерируем уникальный ID
         # Безопасное списание лимита
         if not is_admin_user:
             await UserCRUD.decrement_workout_limit(session, user.telegram_id)
@@ -526,7 +528,17 @@ async def process_workout_done(callback: CallbackQuery, session: AsyncSession, s
     completed_days = data.get("completed_days", [])
     
     workout_label = f"Тренировка День {current_page + 1}"
-    new_log = WorkoutLog(user_id=user_id, workout_type=workout_label, date=now)
+    
+    # 🔥 Достаем юзера из БД, чтобы узнать ID его текущей программы
+    user = await UserCRUD.get_user(session, user_id) 
+    
+    # 🔥 Добавляем program_id в лог
+    new_log = WorkoutLog(
+        user_id=user_id, 
+        workout_type=workout_label, 
+        date=now,
+        program_id=user.current_workout_program_id if user else None
+    )
     session.add(new_log)
     
     await session.commit()
@@ -612,23 +624,40 @@ async def confirm_cycle_reset(callback: CallbackQuery):
     )
     await callback.answer()
 
+import uuid # Не забудь добавить импорт в самом начале файла!
+
 @router.callback_query(F.data == "execute_new_cycle")
 async def execute_cycle_reset(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     user_id = callback.from_user.id
-    await session.execute(delete(WorkoutLog).where(WorkoutLog.user_id == user_id))
-    # 2. 🔥 НОВОЕ: Удаляем историю рабочих весов в упражнениях
+    user = await UserCRUD.get_user(session, user_id)
+    
+    # ❌ УБИРАЕМ: Больше не удаляем WorkoutLog, чтобы сохранить историю!
+    # await session.execute(delete(WorkoutLog).where(WorkoutLog.user_id == user_id))
+    
+    # 🔥 ШАГ 3 ЗДЕСЬ: Создаем новый уникальный ID для нового цикла программ
+    if user:
+        user.current_workout_program_id = str(uuid.uuid4())
+
+    # ⚠️ ВНИМАНИЕ по ExerciseLog:
+    # Если ты хочешь, чтобы бот помнил старые рабочие веса для аналитики,
+    # то ExerciseLog тоже лучше НЕ удалять. Но если тебе прям нужен жесткий сброс весов, оставляй:
     await session.execute(delete(ExerciseLog).where(ExerciseLog.user_id == user_id))
+    
     from database.models import WeightHistory
     await session.execute(delete(WeightHistory).where(WeightHistory.user_id == user_id))
     
-    user = await UserCRUD.get_user(session, user_id)
     if user and user.weight:
         session.add(WeightHistory(user_id=user_id, weight=user.weight))
     
     await session.commit()
+    
+    # Очищаем кэш завершенных дней в оперативной памяти (чтобы галочки пропали прямо сейчас)
     await state.update_data(completed_days=[])
     
-    await callback.message.edit_text("🚀 <b>Новый цикл запущен!</b>\nИстория очищена.", parse_mode="HTML")
+    await callback.message.edit_text(
+        "🚀 <b>Новый цикл запущен!</b>\nГалочки сброшены, но история сохранена для ИИ.", 
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 @router.callback_query(F.data == "cancel_reset")
@@ -765,16 +794,18 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
         state_data = await state.get_data()
         workout_type = state_data.get("workout_type", "Тренировка")
 
+        # 🔥 1. В промпте просим только 5 колонок (БЕЗ ПОДХОДОВ)
         parse_prompt = (
             "Ты — строгий фитнес-аналитик. Твоя задача: привести упражнение к ЕДИНОМУ СТАНДАРТУ для базы данных.\n\n"
             "ПРАВИЛА КАНОНИЧНОГО НАЗВАНИЯ:\n"
             "1. ФОРМУЛА: [Упражнение] + [Снаряд] + [Позиция] + [Угол].\n"
             "2. УГЛЫ: Если указаны градусы (30, 45 и т.д.), ОБЯЗАТЕЛЬНО добавь их в конец.\n"
             "   Пример: 'жим на наклонной 30 град' -> 'Жим штанги в наклоне 30'\n"
-            "3. УДАЛЯЙ МУСОР: слова 'скамья', 'градусов', 'хваты', 'поочередно'.\n"
-            "4. ТРЕНАЖЕРЫ: Смит, Хаммер заменяй на 'в тренажере'.\n\n"
+            "3. УДАЛЯЙ МУСОР: слова 'скамья', 'градусов', 'поочередно'.\n"
+            "4. ТРЕНАЖЕРЫ: Смит, Хаммер заменяй на 'в тренажере'.\n"
+            "5. НЮАНСЫ: Любые уточнения хватов, стоек (узко, широко, обратным) выноси СТРОГО в колонку Нюанс. Если их нет, ставь прочерк '-'.\n\n"
             "СТРОГОЕ ПРАВИЛО: Верни результат списком. НЕ ПИШИ ЗАГОЛОВОК ТАБЛИЦЫ, ВЫВОДИ ТОЛЬКО ДАННЫЕ. Формат:\n"
-            "Оригинал | Каноничное | Вес | Повторы | Подходы\n"
+            "Оригинал | Каноничное | Нюанс | Вес | Повторы\n"
             f"Текст: {input_text}"
         )
         
@@ -786,32 +817,26 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
         lines = ai_response.strip().split('\n')
         saved_exercises = []
         
-        # Парсим железобетонно
-        lines = ai_response.strip().split('\n')
-        saved_exercises = []
-        
         for line in lines:
             if '|' not in line: continue # Пропускаем пустые строки
             
-            # 🔥 НОВАЯ СТРОКА: Игнорируем шапку таблицы от ИИ!
-            if "Каноничное" in line or "Вес" in line or "Оригинальное" in line:
+            # Игнорируем шапку таблицы от ИИ
+            if "Каноничное" in line or "Вес" in line or "Оригинальное" in line or "Нюанс" in line:
                 continue
                 
             parts = line.split('|')
+            # 🔥 2. ОЖИДАЕМ 5 КОЛОНОК
             if len(parts) >= 5:
                 try:
                     orig_name = parts[0].strip()
                     canon_name = parts[1].strip()
+                    comment = parts[2].strip() if parts[2].strip() != "-" else "" 
                     
-                    # Извлекаем числа (регулярки)
-                    weight_match = re.search(r"[\d\.]+", parts[2].strip().replace(',', '.'))
+                    weight_match = re.search(r"[\d\.]+", parts[3].strip().replace(',', '.'))
                     weight = float(weight_match.group(0)) if weight_match else 0.0
                     
-                    reps_match = re.search(r"\d+", parts[3].strip())
+                    reps_match = re.search(r"\d+", parts[4].strip())
                     reps = int(reps_match.group(0)) if reps_match else 0
-                    
-                    sets_match = re.search(r"\d+", parts[4].strip())
-                    sets = int(sets_match.group(0)) if sets_match else 1
                     
                     # СОХРАНЕНИЕ В БАЗУ
                     new_log = WorkoutLog(
@@ -819,13 +844,18 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
                         workout_type=workout_type, 
                         exercise_name=orig_name,
                         canonical_name=canon_name,
+                        comment=comment, 
                         weight=weight,
                         reps=reps,
-                        sets=1,
-                        date=datetime.datetime.now() # Добавил дату, чтобы дневник видел записи
+                        sets=1, # 🔥 Оставляем 1 под капотом для БД, чтобы ничего не сломать
+                        date=datetime.datetime.now()
                     )
                     session.add(new_log)
-                    saved_exercises.append(f"🔹 <b>{canon_name}</b>\n└ {weight} кг x {reps}")
+                    
+                    # 🔥 3. Формируем чистый ответ для интерфейса
+                    comment_text = f" ({comment})" if comment else ""
+                    saved_exercises.append(f"🔹 <b>{canon_name}</b>{comment_text}\n└ {weight} кг x {reps}")
+                    
                 except Exception as parse_err:
                     print(f"⚠️ Ошибка парсинга строки: {line} | {parse_err}")
                     continue
