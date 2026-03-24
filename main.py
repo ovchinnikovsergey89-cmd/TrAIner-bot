@@ -4,6 +4,8 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.telegram import TelegramAPIServer  # Добавили эту строку
+from aiogram.client.session.aiohttp import AiohttpSession # Добавили эту строку для переадресации
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import Config
@@ -55,8 +57,19 @@ async def main():
         logger.critical(f"❌ Ошибка подключения к БД: {e}")
         return
 
+   # 1. Прописываем ВАШЕ личное зеркало на Cloudflare:
+    custom_server = TelegramAPIServer(
+        base="https://lucky-waterfall-1ff7.ovchinnikov-sergey89.workers.dev/bot{token}/{method}",
+        file="https://lucky-waterfall-1ff7.ovchinnikov-sergey89.workers.dev/file/bot{token}/{path}"
+    )
+
+    # 2. Создаем сессию
+    session = AiohttpSession(api=custom_server)
+
+    # 3. Инициализируем бота
     bot = Bot(
         token=Config.BOT_TOKEN,
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     dp = Dispatcher()

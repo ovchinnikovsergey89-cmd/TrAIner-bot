@@ -71,6 +71,10 @@ class WorkoutLog(Base):
     # ИСПРАВЛЕНО: nullable=True позволяет записывать данные, даже если ИИ не распознал имя
     exercise_name = Column(String, nullable=True) 
     canonical_name = Column(String, nullable=True) 
+
+    # 🔥 ДОБАВИТЬ ЭТИ ДВЕ СТРОКИ:
+    comment = Column(String, nullable=True)
+    program_id = Column(String, nullable=True)
     
     weight = Column(Float, default=0.0)
     reps = Column(Integer, default=0)

@@ -123,10 +123,15 @@ async def process_voice_message(message: Message, session: AsyncSession, state: 
         u_ctx = {"name": user.name, "goal": user.goal, "weight": user.weight}
         ai_answer = await manager.get_chat_response(current_history, u_ctx)
 
+        # СТАЛО:
         current_history.append({"role": "assistant", "content": ai_answer})
         await state.update_data(chat_history=current_history[-6:])
 
-        await message.answer(ai_answer, parse_mode="HTML")
+        try:
+            await message.answer(ai_answer, parse_mode="HTML")
+        except:
+            await message.answer(ai_answer) # Отправляем чистый текст, если HTML сломался
+            
         await status_msg.delete()
 
     except Exception as e:

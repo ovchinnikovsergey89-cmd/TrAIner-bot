@@ -356,7 +356,6 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
         return
     
     # Определяем текущую страницу (по умолчанию 0)
-    # callback.data будет выглядеть как "exercise_diary" или "exercise_diary:1"
     parts = callback.data.split(":")
     page = int(parts[1]) if len(parts) > 1 else 0
     ITEMS_PER_PAGE = 10
@@ -373,14 +372,17 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("Твой дневник пока пуст! Записывай веса во время тренировок.", show_alert=True)
         return
         
-    # Оставляем только последние записи для каждого упражнения
+    # 🔥 1. Оставляем последние записи для каждого упражнения С УЧЕТОМ НЮАНСА
     latest_logs_dict = {}
     for log in logs:
         name = log.canonical_name if log.canonical_name else log.exercise_name
         if not name:
             continue
 
-        name_key = name.lower().strip()
+        comment = getattr(log, 'comment', '') or ""
+        # Группируем по связке "Название + Нюанс"
+        name_key = f"{name.lower().strip()}_{comment.lower().strip()}"
+        
         if name_key not in latest_logs_dict:
             latest_logs_dict[name_key] = log
             
@@ -398,11 +400,16 @@ async def show_exercise_diary(callback: CallbackQuery, session: AsyncSession):
             
     text = f"📖 <b>Твой дневник весов (Стр. {page + 1} из {total_pages}):</b>\n\n"
     
+    # 🔥 2. ВЫВОДИМ НЮАНСЫ В ТЕКСТ
     for log in page_logs:
         date_str = log.date.strftime("%d.%m")
         weight_display = int(log.weight) if log.weight.is_integer() else log.weight
         name = log.canonical_name if log.canonical_name else log.exercise_name
-        text += f"🏋️‍♂️ <b>{name.capitalize()}:</b> {weight_display} кг х {log.reps} <i>({date_str})</i>\n"
+        
+        comment = getattr(log, 'comment', '') or ""
+        comment_str = f" ({comment})" if comment else ""
+        
+        text += f"🏋️‍♂️ <b>{name.capitalize()}</b>{comment_str}: {weight_display} кг х {log.reps} <i>({date_str})</i>\n"
         
     text += "\n<i>💡 Чтобы обновить результат, просто запиши новый вес на тренировке.</i>"
     

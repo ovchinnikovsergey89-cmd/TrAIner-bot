@@ -53,15 +53,17 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
     ai_prompt = ""
 
     if analysis_type == "analyze_workouts":
-        workouts_count = await UserCRUD.get_weekly_workouts_count(session, user.telegram_id)
+        # 🔥 1. БЕРЕМ ЦИФРУ ПРЯМО ИЗ ПРОФИЛЯ, чтобы не было расхождений:
+        workouts_count = user.completed_workouts 
         
-        # ХИРУРГИЯ: Меняем ExerciseLog на WorkoutLog! Теперь бот будет смотреть в правильную таблицу
         stmt_ex = (
             select(WorkoutLog)
             .where(
                 WorkoutLog.user_id == user.telegram_id,
                 WorkoutLog.exercise_name.is_not(None),
-                WorkoutLog.weight > 0
+                WorkoutLog.weight > 0,
+                # 🔥 2. ФИЛЬТРУЕМ ТОЛЬКО ТЕКУЩИЙ ЦИКЛ:
+                WorkoutLog.program_id == user.current_workout_program_id 
             )
             .order_by(desc(WorkoutLog.date))
             .limit(100)

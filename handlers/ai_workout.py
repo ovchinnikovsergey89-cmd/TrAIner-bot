@@ -175,7 +175,6 @@ async def request_ai_workout(message: Message, session: AsyncSession, state: FSM
 @router.callback_query(F.data == "select_weekly_workout")
 async def process_weekly_workout_selection(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     user = await UserCRUD.get_user(session, callback.from_user.id)
-    user.completed_workouts += 1
     await session.commit()
     
     # ПРОВЕРКА НАЛИЧИЯ СТАРОЙ ПРОГРАММЫ
@@ -493,6 +492,7 @@ async def noop_btn(callback: CallbackQuery):
 
 # ==========================================
 # --- 5. ОТМЕТКА ВЫПОЛНЕНИЯ (СЧЕТЧИК +1) ---
+# --- 5. ОТМЕТКА ВЫПОЛНЕНИЯ (СЧЕТЧИК +1) ---
 @router.callback_query(F.data == "workout_done")
 async def process_workout_done(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
     user_id = callback.from_user.id
@@ -514,50 +514,54 @@ async def process_workout_done(callback: CallbackQuery, session: AsyncSession, s
             await callback.answer(f"⚠️ Рано! Подожди еще {int(hours_left)} ч.", show_alert=True)
             return
 
-    # 2. ПРИБАВЛЯЕМ +1 В ПРОФИЛЬ
-    result_user = await session.execute(select(User).where(User.telegram_id == user_id))
-    user = result_user.scalar_one_or_none()
-    
-    if user:
-        user.completed_workouts += 1 # Считаем количество выполненных
-
-    # 3. ЗАПИСЫВАЕМ ЛОГ И СОХРАНЯЕМ
+    # 2. ПОЛУЧАЕМ ДАННЫЕ ИЗ ПАМЯТИ
     data = await state.get_data()
     current_page = data.get("current_page", 0)
     pages = data.get("workout_pages", [])
     completed_days = data.get("completed_days", [])
     
-    workout_label = f"Тренировка День {current_page + 1}"
-    
-    # 🔥 Достаем юзера из БД, чтобы узнать ID его текущей программы
+    # 3. ДОСТАЕМ ЮЗЕРА ОДИН РАЗ
     user = await UserCRUD.get_user(session, user_id) 
     
-    # 🔥 Добавляем program_id в лог
-    new_log = WorkoutLog(
-        user_id=user_id, 
-        workout_type=workout_label, 
-        date=now,
-        program_id=user.current_workout_program_id if user else None
-    )
-    session.add(new_log)
-    
-    await session.commit()
-
-    # 4. ОБНОВЛЯЕМ ПАМЯТЬ И ИНТЕРФЕЙС
+    # 4. ГЛАВНАЯ ПРОВЕРКА: Если эта тренировка еще НЕ была выполнена
     if current_page not in completed_days:
+        
+        # Запоминаем в кэше
         completed_days.append(current_page)
         await state.update_data(completed_days=completed_days)
+        
+        if user:
+            # Прибавляем +1 в профиль
+            user.completed_workouts = (user.completed_workouts or 0) + 1
+            
+            # Создаем лог для истории
+            workout_label = f"Тренировка День {current_page + 1}"
+            new_log = WorkoutLog(
+                user_id=user_id, 
+                workout_type=workout_label, 
+                date=now,
+                program_id=user.current_workout_program_id
+            )
+            session.add(new_log)
+            
+            # Фиксируем всё в базе данных одним разом!
+            await session.commit()
+            
+        await callback.answer(f"🔥 Засчитано! Всего тренировок: {user.completed_workouts}", show_alert=True)
+    else:
+        # Если юзер как-то умудрился нажать кнопку дважды
+        await callback.answer("Эта тренировка уже отмечена!", show_alert=True)
 
-    await callback.answer(f"🔥 Засчитано! Всего тренировок: {user.completed_workouts}", show_alert=True)
-    
-    # Смена кнопки на "Отменить"
+    # 5. СМЕНА КНОПКИ НА "ОТМЕНИТЬ" И ОБНОВЛЕНИЕ ИНТЕРФЕЙСА
     base_kb = get_pagination_kb(current_page, len(pages), page_type="workout")
     rows = [[InlineKeyboardButton(text="🔄 Отменить выполнение", callback_data=f"workout_undo_{current_page}")]]
+    
     if base_kb and base_kb.inline_keyboard:
         rows.extend(base_kb.inline_keyboard)
     
     final_keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     page_text = pages[current_page] + "\n\n🌟 <b>Эта тренировка выполнена!</b>"
+    
     await callback.message.edit_text(text=page_text, reply_markup=final_keyboard, parse_mode=ParseMode.HTML)
 
 
@@ -567,34 +571,43 @@ async def process_workout_undo(callback: CallbackQuery, session: AsyncSession, s
     target_page = int(callback.data.split("_")[-1])
     user_id = callback.from_user.id
     
-    # 1. ВЫЧИТАЕМ -1 ИЗ ПРОФИЛЯ
-    result_user = await session.execute(select(User).where(User.telegram_id == user_id))
-    user = result_user.scalar_one_or_none()
-    if user and user.completed_workouts > 0:
-        user.completed_workouts -= 1
-
-    # 2. УДАЛЯЕМ ЛОГ ИЗ БАЗЫ
-    stmt = delete(WorkoutLog).where(
-        WorkoutLog.user_id == user_id,
-        WorkoutLog.workout_type == f"Тренировка День {target_page + 1}"
-    )
-    await session.execute(stmt)
-    await session.commit()
-
-    # 3. УДАЛЯЕМ ИЗ ПАМЯТИ
+    # 1. ПОЛУЧАЕМ ДАННЫЕ ИЗ ПАМЯТИ
     data = await state.get_data()
     completed_days = data.get("completed_days", [])
     pages = data.get("workout_pages", [])
     
+    # 2. ГЛАВНАЯ ПРОВЕРКА: Действуем, только если день реально был отмечен
     if target_page in completed_days:
+        # Убираем галочку из кэша
         completed_days.remove(target_page)
         await state.update_data(completed_days=completed_days)
+        
+        # Достаем юзера ОДИН раз
+        user = await UserCRUD.get_user(session, user_id)
+        
+        if user:
+            # Отнимаем 1 из профиля (но не даем уйти в минус)
+            if user.completed_workouts and user.completed_workouts > 0:
+                user.completed_workouts -= 1
+            
+            # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Удаляем лог ТОЛЬКО для текущей программы!
+            stmt = delete(WorkoutLog).where(
+                WorkoutLog.user_id == user_id,
+                WorkoutLog.workout_type == f"Тренировка День {target_page + 1}",
+                WorkoutLog.program_id == user.current_workout_program_id # Защищаем старую историю!
+            )
+            await session.execute(stmt)
+            await session.commit()
+            
+        await callback.answer("🔄 Отменено. Счетчик обновлен.", show_alert=True)
+    else:
+        # Если юзер нажал кнопку дважды или произошел рассинхрон
+        await callback.answer("Выполнение уже отменено!", show_alert=False)
 
-    await callback.answer("🔄 Отменено. Счетчик обновлен.", show_alert=True)
-
-    # 4. ВОЗВРАЩАЕМ КНОПКУ "ВЫПОЛНЕНО"
+    # 3. ВОЗВРАЩАЕМ КНОПКУ "ВЫПОЛНЕНО" И ОБНОВЛЯЕМ ИНТЕРФЕЙС
     base_kb = get_pagination_kb(target_page, len(pages), page_type="workout")
     rows = [[InlineKeyboardButton(text="✅ Тренировка выполнена", callback_data="workout_done")]]
+    
     if base_kb and base_kb.inline_keyboard:
         rows.extend(base_kb.inline_keyboard)
     
@@ -631,17 +644,17 @@ async def execute_cycle_reset(callback: CallbackQuery, session: AsyncSession, st
     user_id = callback.from_user.id
     user = await UserCRUD.get_user(session, user_id)
     
-    # ❌ УБИРАЕМ: Больше не удаляем WorkoutLog, чтобы сохранить историю!
-    # await session.execute(delete(WorkoutLog).where(WorkoutLog.user_id == user_id))
-    
-    # 🔥 ШАГ 3 ЗДЕСЬ: Создаем новый уникальный ID для нового цикла программ
     if user:
+        # 1. Генерируем новый ID цикла для истории ИИ
         user.current_workout_program_id = str(uuid.uuid4())
+        
+        # 🔥 2. ОБНУЛЯЕМ СЧЕТЧИК ТРЕНИРОВОК ДЛЯ ПРОФИЛЯ
+        user.completed_workouts = 0 
 
-    # ⚠️ ВНИМАНИЕ по ExerciseLog:
-    # Если ты хочешь, чтобы бот помнил старые рабочие веса для аналитики,
-    # то ExerciseLog тоже лучше НЕ удалять. Но если тебе прям нужен жесткий сброс весов, оставляй:
+    # Дальше твой код очистки логов весов...
     await session.execute(delete(ExerciseLog).where(ExerciseLog.user_id == user_id))
+    
+    # ... остальной код (commit, state.update_data, edit_text)
     
     from database.models import WeightHistory
     await session.execute(delete(WeightHistory).where(WeightHistory.user_id == user_id))
@@ -871,10 +884,11 @@ async def process_workout_weights(message: Message, session: AsyncSession, state
         if saved_exercises:
             result_text = "✨ <b>Записано в дневник:</b>\n\n" + "\n\n".join(saved_exercises)
             result_text += "\n\n<i>✍️ Пиши/диктуй дальше или нажми «Завершить»</i>"
-            
             await status_msg.edit_text(result_text, parse_mode="HTML")
         else:
-            await status_msg.edit_text("❌ Не удалось распознать упражнение. Попробуй еще раз.")
+            # 🔥 ВЫВОДИМ СЫРОЙ ОТВЕТ ИИ ДЛЯ ДЕБАГА
+            debug_text = f"❌ Ошибка парсинга. \nОтвет ИИ был таким:\n\n{ai_response}"
+            await status_msg.edit_text(debug_text)
 
     except Exception as e:
         print(f"❌ Критическая ошибка ИИ: {e}")
