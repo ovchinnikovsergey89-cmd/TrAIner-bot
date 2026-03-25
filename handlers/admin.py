@@ -40,7 +40,6 @@ def is_admin(user_id: int) -> bool:
 # 1. ГЛАВНОЕ МЕНЮ АДМИНА
 # ==========================================
 @router.message(Command("admin"))
-
 async def admin_panel_start(message: Message):
     if not is_admin(message.from_user.id): return
 
@@ -48,8 +47,8 @@ async def admin_panel_start(message: Message):
         [InlineKeyboardButton(text="📊 Живая статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="📢 Глобальная рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🔑 Управление юзером", callback_data="admin_users")],
-        [InlineKeyboardButton(text="🎟 Управление промокодами", callback_data="admin_list_promos")], # НОВАЯ КНОПКА
-        [InlineKeyboardButton(text="📢 Массовая рассылка", callback_data="admin_broadcast")]
+        [InlineKeyboardButton(text="🎟 Управление промокодами", callback_data="admin_list_promos")] 
+        # Кнопку "Массовая рассылка" отсюда удалили
     ])
     
     await message.answer(

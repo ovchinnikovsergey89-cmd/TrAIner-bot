@@ -1,5 +1,7 @@
 import logging
 import datetime
+import asyncio
+from aiogram.exceptions import TelegramBadRequest
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode, ChatAction
@@ -46,99 +48,132 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
         return await callback.answer("Лимит анализа исчерпан. Оформи Premium!", show_alert=True)
 
     analysis_type = callback.data
-    status_msg = await callback.message.edit_text("⏳ <i>Тренер изучает твои данные...</i>", parse_mode="HTML")
+    
+    # --- 🔥 ДОБАВЛЕНА ЗАЩИТА ОТ ДВОЙНОГО НАЖАТИЯ ---
+    try:
+        status_msg = await callback.message.edit_text("⏳ <i>Тренер изучает твои данные...</i>", parse_mode="HTML")
+    except TelegramBadRequest:
+        # Если текст уже "Тренер изучает...", Telegram выдаст ошибку. Мы её игнорируем!
+        status_msg = callback.message
+    # -----------------------------------------------
+
     manager = AIManager()
     
-    graph_bytes = None
-    ai_prompt = ""
-
-    if analysis_type == "analyze_workouts":
-        # 🔥 1. БЕРЕМ ЦИФРУ ПРЯМО ИЗ ПРОФИЛЯ, чтобы не было расхождений:
-        workouts_count = user.completed_workouts 
-        
-        stmt_ex = (
-            select(WorkoutLog)
-            .where(
-                WorkoutLog.user_id == user.telegram_id,
-                WorkoutLog.exercise_name.is_not(None),
-                WorkoutLog.weight > 0,
-                # 🔥 2. ФИЛЬТРУЕМ ТОЛЬКО ТЕКУЩИЙ ЦИКЛ:
-                WorkoutLog.program_id == user.current_workout_program_id 
-            )
-            .order_by(desc(WorkoutLog.date))
-            .limit(100)
-        )
-        res_ex = await session.execute(stmt_ex)
-        exercises = res_ex.scalars().all()
-        exercises.reverse()
-        
-        if exercises:
-            graph_buf = await GraphService.create_workouts_graph(exercises)
-            if graph_buf: graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="workouts.png")
-
-            ex_dict = {}
-            for ex in reversed(exercises):
-                name = ex.exercise_name.lower().strip()
-                # Используем getattr на случай, если в WorkoutLog нет колонки reps
-                reps = getattr(ex, 'reps', '')
-                reps_str = f" х {reps}" if reps else ""
-                
-                if name not in ex_dict:
-                    ex_dict[name] = f"{ex.weight}кг{reps_str}"
-            
-            ex_text = "; ".join([f"{k.capitalize()}: {v}" for k, v in list(ex_dict.items())[:15]])
-        else:
-            ex_text = "Нет данных."
-
-        ai_prompt = (f"Ты фитнес-тренер. Оцени тренировки клиента (Цель: {user.goal}). "
-                     f"Выполнено тренировок за неделю: {workouts_count}. "
-                     f"Последние веса: {ex_text}. Дай профессиональный совет. "
-                     f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу. "
-                     f"Пиши строго только про тренировки. Без приветствий (максимум 600 символов).")
-
-    elif analysis_type == "analyze_nutrition":
-        seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
-        stmt_nut = select(
-            func.date(NutritionLog.date).label("day"),
-            NutritionLog.meal_type,
-            func.sum(NutritionLog.calories).label("kcal"),
-            func.sum(NutritionLog.protein).label("p"),
-            func.sum(NutritionLog.fat).label("f"),
-            func.sum(NutritionLog.carbs).label("c")
-        ).where(NutritionLog.user_id == user.telegram_id, NutritionLog.date >= seven_days_ago)\
-         .group_by(func.date(NutritionLog.date), NutritionLog.meal_type).order_by("day")
-        
-        res_nut = await session.execute(stmt_nut)
-        nut_days_raw = res_nut.all()
-        
-        if nut_days_raw:
-            user_sub = user.subscription_level or "free"
-            graph_buf = await GraphService.create_nutrition_graph(nut_days_raw, user_sub)
-            if graph_buf: 
-                graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="nutrition.png")
-        
-        nut_text = "Нет данных."
-        if nut_days_raw:
-            days_dict = {}
-            for d in nut_days_raw:
-                if d.day not in days_dict: days_dict[d.day] = []
-                days_dict[d.day].append(f"{d.meal_type}: {int(d.kcal)}ккал(Б{int(d.p)})")
-            
-            nut_text = "\n".join([f"• {day}: " + ", ".join(meals) for day, meals in days_dict.items()])
-        else:
-            nut_text = "Нет данных."
-
-        # Промпт не изменен, только добавлены точечные запреты в конец
-        target_cal = user.target_calories or "не задана"
-        ai_prompt = (f"Ты нутрициолог. Оцени рацион клиента за 7 дней (Цель: {user.goal}, Вес: {user.weight}кг). "
-                     f"🎯 ЕГО РАССЧИТАННАЯ НОРМА: {target_cal} ккал. "
-                     f"Сводка КБЖУ: {nut_text}. Дай профессиональный совет. "
-                     f"🚨 ЗАПРЕЩЕНО советовать клиенту другую калорийность! Оценивай только то, как он соблюдает свою норму ({target_cal} ккал). "
-                     f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу. "
-                     f"Пиши строго только про питание. Без приветствий (максимум 600 символов).")
-
+    # 🔥 Оборачиваем ВЕСЬ код в try, чтобы бот не зависал при сбоях БД или графиков
     try:
+        graph_bytes = None
+        ai_prompt = ""
+
+        if analysis_type == "analyze_workouts":
+            workouts_count = user.completed_workouts 
+            
+            fourteen_days_ago = datetime.datetime.now() - datetime.timedelta(days=14)
+            
+            stmt_ex = (
+                select(WorkoutLog)
+                .where(
+                    WorkoutLog.user_id == user.telegram_id,
+                    WorkoutLog.exercise_name.is_not(None),
+                    WorkoutLog.date >= fourteen_days_ago.date()
+                )
+                .order_by(desc(WorkoutLog.date))
+                .limit(100)
+            )
+            res_ex = await session.execute(stmt_ex)
+            exercises = res_ex.scalars().all()
+            exercises.reverse()
+            
+            if exercises:
+                try:
+                    graph_buf = await GraphService.create_workouts_graph(exercises)
+                    if graph_buf: graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="workouts.png")
+                except Exception as e:
+                    logger.error(f"Ошибка графика тренировок: {e}")
+
+                # 🔥 УМНЫЙ ПОИСК РАБОЧИХ ВЕСОВ (Берем только максимальные)
+                ex_dict = {}
+                for ex in exercises:
+                    name = ex.exercise_name.lower().strip()
+                    try:
+                        weight = float(ex.weight or 0)
+                    except:
+                        weight = 0.0
+                    reps = getattr(ex, 'reps', '')
+                    
+                    if name not in ex_dict:
+                        ex_dict[name] = {"w": weight, "r": reps}
+                    else:
+                        # Если нашли вес больше записанного — обновляем (игнорируем разминки с 0 кг)
+                        if weight > ex_dict[name]["w"]:
+                            ex_dict[name] = {"w": weight, "r": reps}
+                
+                ex_list = []
+                for k, v in list(ex_dict.items())[:15]:
+                    w_str = f"{int(v['w']) if v['w'].is_integer() else v['w']}кг"
+                    r_str = f" х {v['r']}" if v['r'] else ""
+                    ex_list.append(f"{k.capitalize()}: {w_str}{r_str}")
+                
+                ex_text = "; ".join(ex_list)
+            else:
+                ex_text = "Нет свежих данных за последние 14 дней."
+
+            # 🔥 ПРОДВИНУТЫЙ ПРОМПТ ДЛЯ ИИ
+            ai_prompt = (f"Ты продвинутый фитнес-тренер. Проанализируй рабочие веса клиента. "
+                         f"Его собственный вес: {user.weight}кг, Цель: {user.goal}. "
+                         f"В ТЕКУЩЕМ цикле выполнено тренировок: {workouts_count}. "
+                         f"Его ЛУЧШИЕ рабочие веса за 14 дней: {ex_text}. "
+                         f"Сделай профессиональный вывод о его силовых показателях (сопоставь рабочие веса с его весом тела {user.weight}кг). "
+                         f"ВАЖНО: Клиент НЕ новичок, не пиши базовые советы про 'нулевые веса' или 'тело учится технике'. "
+                         f"Не используй слово 'Вердикт'. Пиши строго по делу, как опытный тренер (максимум 600 символов).")
+
+        elif analysis_type == "analyze_nutrition":
+            seven_days_ago = datetime.datetime.now() - datetime.timedelta(days=7)
+            stmt_nut = select(
+                func.date(NutritionLog.date).label("day"),
+                NutritionLog.meal_type,
+                func.sum(NutritionLog.calories).label("kcal"),
+                func.sum(NutritionLog.protein).label("p"),
+                func.sum(NutritionLog.fat).label("f"),
+                func.sum(NutritionLog.carbs).label("c")
+            ).where(NutritionLog.user_id == user.telegram_id, NutritionLog.date >= seven_days_ago.date())\
+             .group_by(func.date(NutritionLog.date), NutritionLog.meal_type).order_by("day")
+            
+            res_nut = await session.execute(stmt_nut)
+            nut_days_raw = res_nut.all()
+            
+            if nut_days_raw:
+                try:
+                    user_sub = user.subscription_level or "free"
+                    graph_buf = await GraphService.create_nutrition_graph(nut_days_raw, user_sub)
+                    if graph_buf: 
+                        graph_bytes = BufferedInputFile(graph_buf.getvalue(), filename="nutrition.png")
+                except Exception as e:
+                    logger.error(f"Ошибка графика питания: {e}")
+            
+            if nut_days_raw:
+                days_dict = {}
+                for d in nut_days_raw:
+                    if d.day not in days_dict: days_dict[d.day] = []
+                    # Подстраховка от пустых значений (None)
+                    kcal = int(d.kcal or 0)
+                    p = int(d.p or 0)
+                    days_dict[d.day].append(f"{d.meal_type}: {kcal}ккал(Б{p})")
+                
+                nut_text = "\n".join([f"• {day}: " + ", ".join(meals) for day, meals in days_dict.items()])
+            else:
+                nut_text = "Нет данных."
+
+            target_cal = user.target_calories or "не задана"
+            ai_prompt = (f"Ты нутрициолог. Оцени рацион клиента за 7 дней (Цель: {user.goal}, Вес: {user.weight}кг). "
+                         f"🎯 ЕГО РАССЧИТАННАЯ НОРМА: {target_cal} ккал. "
+                         f"Сводка КБЖУ: {nut_text}. Дай профессиональный совет. "
+                         f"🚨 ЗАПРЕЩЕНО советовать клиенту другую калорийность! Оценивай только то, как он соблюдает свою норму ({target_cal} ккал). "
+                         f"ВАЖНО: Не используй слово 'Вердикт' в своем ответе, сразу пиши по делу. "
+                         f"Пиши строго только про питание. Без приветствий (максимум 600 символов).")
+
+        # Генерация ответа ИИ
         analysis = await manager.get_chat_response([{"role": "user", "content": ai_prompt}], {})
+        
         if not is_admin(user.telegram_id): user.workout_limit -= 1
         await session.commit()
         await status_msg.delete()
@@ -146,18 +181,40 @@ async def process_instant_analysis(callback: CallbackQuery, session: AsyncSessio
         title = "🏋️‍♂️ Анализ тренировок" if analysis_type == "analyze_workouts" else "🍏 Анализ питания"
         caption_text = f"<b>{title}</b>\n\n💬 <b>Вердикт тренера:</b>\n{analysis}"
         
-        if graph_bytes:
-            if len(caption_text) <= 1024:
-                await callback.message.answer_photo(graph_bytes, caption=caption_text, parse_mode="HTML")
-            else:
-                await callback.message.answer_photo(graph_bytes)
-                await callback.message.answer(caption_text, parse_mode="HTML")
-        else:
-            await callback.message.answer(caption_text, parse_mode="HTML")
-            
+        # 🔥 НОВЫЙ БЛОК: Механизм повторных попыток для отправки в Telegram
+        # 🔥 Механизм повторных попыток с умным фолбэком (отправка без картинки при сбое)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Если это последняя попытка — принудительно убираем график, чтобы спасти отправку
+                if attempt == max_retries - 1 and graph_bytes:
+                    logger.warning("Последняя попытка: пробуем отправить только текст (без графика)...")
+                    graph_bytes = None 
+                    caption_text += "\n\n<i>(📊 График временно недоступен из-за проблем со связью)</i>"
+
+                if graph_bytes:
+                    if len(caption_text) <= 1024:
+                        await callback.message.answer_photo(graph_bytes, caption=caption_text, parse_mode="HTML")
+                    else:
+                        await callback.message.answer_photo(graph_bytes)
+                        await callback.message.answer(caption_text, parse_mode="HTML")
+                else:
+                    await callback.message.answer(caption_text, parse_mode="HTML")
+                
+                break # Успех! Выходим из цикла
+                
+            except Exception as send_error:
+                logger.warning(f"Попытка отправки {attempt + 1} сорвалась: {send_error}")
+                if attempt == max_retries - 1:
+                    raise send_error # Если даже текст не ушел (совсем нет сети), сдаемся
+                await asyncio.sleep(1.5) # Ждем полторы секунды перед новой попыткой
+
     except Exception as e:
         logger.error(f"Ошибка мгновенного анализа: {e}")
-        await status_msg.edit_text("❌ Ошибка при составлении отчета. Тренер занят, попробуй позже.")
+        try:
+            await status_msg.edit_text("❌ Ошибка при составлении отчета. Тренер занят, попробуй позже.")
+        except Exception:
+            await callback.message.answer("❌ Ошибка при составлении отчета. Тренер занят, попробуй позже.")
 
 # --- 3. АНАЛИЗ С ВВОДОМ ВЕСА ---
 @router.callback_query(F.data.in_(["analyze_weight", "analyze_full"]))

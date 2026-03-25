@@ -17,9 +17,9 @@ from keyboards.builders import (
     get_activity_keyboard, 
     get_goal_keyboard,
     get_workout_level_keyboard,
-    get_workout_days_keyboard,
-    get_main_menu
+    get_workout_days_keyboard
 )
+
 from keyboards.main_menu import get_main_menu
 
 router = Router()

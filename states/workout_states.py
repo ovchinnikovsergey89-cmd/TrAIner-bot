@@ -9,3 +9,5 @@ class WorkoutRequest(StatesGroup):
     waiting_for_nutrition_wishes = State()
     waiting_for_adjustments = State() # Ожидание правок от пользователя
     waiting_for_weights = State() # <-- НОВОЕ: Ожидание ввода веса
+
+    
