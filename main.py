@@ -102,6 +102,7 @@ async def main():
     # --- ПОРЯДОК РОУТЕРОВ (ВАЖЕН!) ---
     dp.include_routers(
         admin.router,     # Админка (всегда первая)
+        payments.router,
         common.router,    # Общие команды (/cancel, Техника)
         ai_workout.router,# Перенесите сюда (теперь он приоритетный)
         analysis.router,  # Анализ веса (чтобы перехватывать числа)
@@ -109,8 +110,8 @@ async def main():
         start.router,     # Регистрация
         profile.router,   # Профиль и настройки
         ai_chat.router,   # Чат с тренером
-        help.router,       # Помощь (в конце)
-        payments.router
+        help.router       # Помощь (в конце)
+        
     )
 
     await on_startup(bot)

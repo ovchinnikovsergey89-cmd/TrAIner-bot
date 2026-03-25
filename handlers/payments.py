@@ -29,7 +29,7 @@ async def show_subscription_plans(callback: types.CallbackQuery, session: AsyncS
     
     text = f"""
 💎 <b>Выберите уровень подписки или Апгрейд:</b>
-💳 <i>Ваш баланс: {user.referral_balance} руб.</i>
+💳 <i>Ваш баланс: {user.referral_balance or 0} руб.</i>
 
 <b>🆓 Free (0₽)</b>
 • 3 генерации / 5 вопросов
@@ -200,6 +200,7 @@ async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(ok=True)
 
 # 6. УСПЕШНОЕ ПОПОЛНЕНИЕ БАЛАНСА
+# 6. УСПЕШНОЕ ПОПОЛНЕНИЕ БАЛАНСА
 @router.message(F.successful_payment)
 async def success_payment(message: Message, session: AsyncSession):
     payment_info = message.successful_payment
@@ -208,22 +209,24 @@ async def success_payment(message: Message, session: AsyncSession):
     if payload.startswith("topup_"):
         amount_rub = payment_info.total_amount / 100 
         
-        # 1. Зачисляем деньги юзеру
+        # Получаем юзера
         user = await UserCRUD.get_user(session, message.from_user.id)
-        user.referral_balance += amount_rub
+        
+        # ИСПРАВЛЕНИЕ 1: Проверяем на None, чтобы не было ошибки при сложении
+        if user.referral_balance is None:
+            user.referral_balance = 0.0
+            
+        # ИСПРАВЛЕНИЕ 2: Зачисляем именно на тот баланс, который ты используешь
+        # Если ты хочешь, чтобы это был общий баланс для покупок:
+        user.referral_balance += amount_rub 
+        
         await session.commit()
         
-        # 2. Начисляем кэшбэк рефереру (если он есть)
+        # 2. Начисляем кэшбэк рефереру
         await UserCRUD.add_referral_reward(session, message.from_user.id, amount_rub)
         
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Выбрать тариф", callback_data="buy_premium")]
-        ])
-        
         await message.answer(
-            f"✅ <b>Баланс пополнен!</b>\n\n"
-            f"Зачислено: {amount_rub} руб.\n"
-            f"Текущий баланс: <b>{user.referral_balance} руб.</b>",
-            reply_markup=kb,
-            parse_mode="HTML"
+            f"✅ Оплата прошла успешно!\n"
+            f"На ваш счет зачислено: {amount_rub} руб.\n"
+            f"Текущий баланс: {user.referral_balance} руб."
         )
