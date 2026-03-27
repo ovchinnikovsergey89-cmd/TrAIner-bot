@@ -9,6 +9,7 @@ router = Router()
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
+    support_link = "https://t.me/@Semen999174?text=Support%20TrAIner%20bot:%20"
     """
     Выводит подробную инструкцию по кнопкам и возможностям бота.
     """
@@ -54,10 +55,15 @@ async def cmd_help(message: Message):
         "/start — Перезапустить бота / Главное меню\n"
         "/help — Вызвать эту справку\n"
         "/profile — Открыть свой профиль\n\n"
+
+        f'<b><a href="{support_link}">Support TrAIner bot</a></b>\n\n'  # ВОТ ТВОЯ ССЫЛКА
         
         "💡 <i>Совет: Если ИИ-чат или генерация тренировки занимает некоторое время, не переживай — нейросеть тщательно анализирует твои данные, чтобы выдать лучший результат!</i>"
-    )
     
+        ""
+    )
+
+
     await message.answer(
         text=help_text,
         parse_mode=ParseMode.HTML,

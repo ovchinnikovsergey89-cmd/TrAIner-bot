@@ -2,6 +2,7 @@ import logging
 import datetime
 import pytz
 import random
+import asyncio
 from aiogram import Bot
 from sqlalchemy import update, select, func, desc
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -179,3 +180,77 @@ async def reset_daily_limits(session_pool: async_sessionmaker):
             logger.info("✅ Лимиты успешно обновлены по новым тарифам!")
         except Exception as e:
             logger.error(f"❌ Ошибка при сбросе лимитов: {e}")
+
+
+async def auto_post_to_channel(bot: Bot):
+    """Генерирует и отправляет пост в маркетинговый канал"""
+    manager = AIManager()
+    channel_id = "@TrAIner_Life" # Наш крутой канал
+    
+    logger.info("📢 Запуск генерации автоматического поста в канал...")
+    
+    try:
+        post_text = await manager.generate_marketing_post()
+        await bot.send_message(chat_id=channel_id, text=post_text, parse_mode="HTML")
+        logger.info("✅ Рекламный пост успешно опубликован в @TrAIner_Life!")
+    except Exception as e:
+        logger.error(f"❌ Ошибка автопостинга в канал: {e}")       
+
+# В конец файла services/scheduler.py
+
+async def auto_post_to_channel(bot: Bot):
+    """Генерирует и отправляет пост с элементами случайности"""
+    
+    # 1. Вероятность публикации (30%)
+    if random.random() > 0.3: 
+        logger.info("🎲 Рандом решил не постить в этом часу.")
+        return
+
+    # 2. Случайная задержка от 1 до 50 минут.
+    wait_time = random.randint(1, 50)
+    logger.info(f"⏳ Рандом выбран! Пост выйдет через {wait_time} минут.")
+    await asyncio.sleep(wait_time * 60)
+
+    # 3. Сама генерация и отправка
+    manager = AIManager()
+    channel_id = "@TrAIner_Life"
+    bot_username = "@TrAInerFitnessBot"
+
+    try:
+        post_text = await manager.generate_marketing_post()
+        await bot.send_message(chat_id=channel_id, text=post_text, parse_mode="HTML")
+        logger.info(f"✅ Автопост опубликован в @TrAIner_Life!")
+    except Exception as e:
+        logger.error(f"❌ Ошибка автопостинга: {e}")
+
+def setup_scheduler(scheduler, bot, session_pool):
+    """
+    Регистрирует все фоновые задачи бота.
+    """
+    # 1. Сброс лимитов в полночь
+    scheduler.add_job(
+        reset_daily_limits, 
+        trigger='cron', 
+        hour=0, 
+        minute=0, 
+        kwargs={'session_pool': session_pool}
+    )
+    
+    # 2. Утренняя мотивация (проверяет каждый час)
+    scheduler.add_job(
+        send_morning_motivation, 
+        trigger='cron', 
+        minute=0, 
+        kwargs={'bot': bot, 'session_pool': session_pool}
+    )
+    
+    # 3. Наш умный автопостинг в канал (каждый час с рандомом внутри)
+    scheduler.add_job(
+        auto_post_to_channel,
+        trigger='cron',
+        hour='9-21', 
+        minute=0,
+        kwargs={'bot': bot}
+    )
+    
+    logger.info("📅 Все задачи планировщика успешно зарегистрированы!")             

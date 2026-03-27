@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+import random
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -15,7 +16,7 @@ from database.database import init_db, async_session
 # Добавили common и nutrition
 from handlers import start, help, profile, nutrition, ai_workout, ai_chat, analysis, admin, common, payments
 from middlewares.db_middleware import DbSessionMiddleware
-from services.scheduler import send_morning_motivation, reset_daily_limits
+from services.scheduler import setup_scheduler
 
 # 1. Основная настройка (оставляем INFO, чтобы видеть твои ракеты и галочки)
 logging.basicConfig(
@@ -79,22 +80,7 @@ async def main():
     # --- НАСТРОЙКА ПЛАНИРОВЩИКА ---
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     
-    # 🔥 ВАЖНО: Запускаем job каждый час (в 00 минут), чтобы проверять notification_time
-    scheduler.add_job(
-        send_morning_motivation, 
-        trigger='cron', 
-        minute=0, # Каждые 00 минут каждого часа (0:00, 1:00 ... 23:00)
-        kwargs={'bot': bot, 'session_pool': async_session}
-    )
-
-    # НОВОЕ: Сброс лимитов ровно в 00:00
-    scheduler.add_job(
-        reset_daily_limits,
-        trigger='cron',
-        hour=0,
-        minute=0,
-        kwargs={'session_pool': async_session}
-    )
+    setup_scheduler(scheduler, bot, async_session)
 
     scheduler.start()
     logger.info("⏰ Планировщик запущен (Проверка каждый час)")
@@ -133,3 +119,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("👋 Выход по Ctrl+C")
+
+     
